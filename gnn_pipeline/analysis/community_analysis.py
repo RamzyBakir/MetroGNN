@@ -2,24 +2,166 @@ import numpy as np
 import networkx as nx
 import torch
 
-def advanced_community_analysis (query_topics, updated_embeddings, data, topic_names,
+
+
+try:
+    import community as louvain_community
+
+    LOUVAIN_AVAILABLE = True
+except ImportError:
+    LOUVAIN_AVAILABLE = False
+    print("python-louvain not installed. Using heuristic method only.")
+
+
+def hybrid_louvain_refinement(researcher_ids, collaboration_edges, min_size=10,
+                              data=None, embeddings=None, influence_scores=None, query_topics=None):
+
+    if not LOUVAIN_AVAILABLE or len(researcher_ids) < min_size:
+        return researcher_ids
+
+
+    G = nx.Graph()
+    G.add_nodes_from(researcher_ids)
+
+
+    for i in range(collaboration_edges.shape[1]):
+        src, dst = collaboration_edges[:, i]
+        src_int, dst_int = int(src), int(dst)
+        if src_int in researcher_ids and dst_int in researcher_ids:
+            G.add_edge(src_int, dst_int)
+
+
+    best_partition = None
+    best_modularity = -1
+
+    for resolution in [0.5, 1.0, 1.5, 2.0]:  # From paper
+        partition = louvain_community.best_partition(G, resolution=resolution)
+        modularity = louvain_community.modularity(partition, G)
+
+        if modularity > best_modularity:
+            best_modularity = modularity
+            best_partition = partition
+
+
+    if best_partition:
+        communities_dict = {}
+        for node, comm_id in best_partition.items():
+            communities_dict.setdefault(comm_id, []).append(node)
+
+        scored_communities = []
+        for comm_id, members in communities_dict.items():
+            if len(members) >= 5:
+                score = paper_community_score(
+                    members,
+                    G,
+                    collaboration_edges,
+                    data,
+                    embeddings,
+                    influence_scores,
+                    query_topics
+                )
+                scored_communities.append((score, members))
+
+        if scored_communities:
+            best_community = max(scored_communities, key=lambda x: x[0])[1]
+            return best_community
+
+    return researcher_ids
+
+
+def paper_community_score(community_members, G, collaboration_edges, data,
+                          embeddings=None, influence_scores=None, query_topics=None,
+                          alpha=0.4, beta=0.4, gamma=0.2):
+
+    subgraph = G.subgraph(community_members)
+    if len(community_members) > 1:
+        cohesion = nx.density(subgraph)
+    else:
+        cohesion = 0
+
+
+    if influence_scores is not None:
+        influence = np.mean([influence_scores[m].item() for m in community_members
+                             if m < len(influence_scores)])
+    else:
+        degrees = [subgraph.degree(m) for m in community_members]
+        influence = np.mean(degrees) / max(degrees) if degrees else 0
+
+
+    relevance = calculate_community_topic_relevance(
+        community_members, query_topics, data, embeddings
+    )
+
+
+    score = alpha * cohesion + beta * influence + gamma * relevance
+    return score
+
+
+def calculate_community_topic_relevance(community_members, query_topics, data, embeddings):
+
+    if not query_topics or not embeddings:
+        return 0.5
+
+    try:
+
+        researcher_embeddings = embeddings.get('researcher_enhanced', embeddings.get('researcher'))
+        if researcher_embeddings is None:
+            return 0.5
+
+
+        topic_embeddings = embeddings.get('topic')
+        if topic_embeddings is None:
+            return 0.5
+
+
+        community_embs = []
+        for researcher_id in community_members:
+            if researcher_id < len(researcher_embeddings):
+                community_embs.append(researcher_embeddings[researcher_id])
+
+        if not community_embs:
+            return 0.5
+
+        community_centroid = np.mean([emb.numpy() if torch.is_tensor(emb) else emb
+                                      for emb in community_embs], axis=0)
+
+        query_topic_embs = []
+        for topic_id in query_topics:
+            if topic_id < len(topic_embeddings):
+                query_topic_embs.append(topic_embeddings[topic_id])
+
+        if not query_topic_embs:
+            return 0.5
+
+        query_centroid = np.mean([emb.numpy() if torch.is_tensor(emb) else emb
+                                  for emb in query_topic_embs], axis=0)
+
+
+        from sklearn.metrics.pairwise import cosine_similarity
+        similarity = cosine_similarity([community_centroid], [query_centroid])[0][0]
+
+        return max(0.0, min(1.0, similarity))
+
+    except Exception as e:
+        print(f"Topic relevance calculation error: {e}")
+        return 0.5
+
+
+def advanced_community_analysis(query_topics, updated_embeddings, data, topic_names,
                                 importance_logits, role_logits, influence_scores):
 
     if not query_topics:
         return {"error": "No relevant topics found in query."}
 
-
+    # PHASE 1: Fast heuristic topic filtering
     paper_topic_edges = data['paper', 'has_topic', 'topic'].edge_index.numpy()
-
 
     relevant_papers = set()
     for topic_id in query_topics:
-
         paper_indices = paper_topic_edges[0][paper_topic_edges[1] == topic_id]
         relevant_papers.update(paper_indices)
 
     author_edges = data['researcher', 'authored', 'paper'].edge_index.numpy()
-
 
     relevant_researchers = set()
     topic_researcher_counts = {}
@@ -29,30 +171,49 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         for author in paper_authors:
             author_int = int(author)
             relevant_researchers.add(author_int)
-
             topic_researcher_counts[author_int] = topic_researcher_counts.get(author_int, 0) + 1
-
 
     collaboration_edges = data['researcher', 'collaborates_with', 'researcher'].edge_index.numpy()
     community_members = set(relevant_researchers)
 
+    # Expand to collaborators (heuristic expansion)
     for res in relevant_researchers:
         collaborators = collaboration_edges[1][collaboration_edges[0] == res]
-
         for collab in collaborators:
             collab_int = int(collab)
-
             collab_papers = author_edges[1][author_edges[0] == collab_int]
             has_topic_papers = any(paper in relevant_papers for paper in collab_papers)
             if has_topic_papers or topic_researcher_counts.get(res, 0) > 2:
                 community_members.add(collab_int)
 
+    # PHASE 2: Hybrid refinement (Louvain only for large communities)
+    LOUVAIN_THRESHOLD = 15
+    if len(community_members) >= LOUVAIN_THRESHOLD and LOUVAIN_AVAILABLE:
+        print(f"  Applying Louvain refinement to {len(community_members)} candidate members")
+
+        # Call hybrid Louvain refinement
+        refined_members = hybrid_louvain_refinement(
+            list(community_members),
+            collaboration_edges,
+            data=data,
+            embeddings=updated_embeddings,
+            influence_scores=influence_scores,
+            query_topics=query_topics
+        )
+
+        if refined_members and isinstance(refined_members, list):
+            community_members = set(refined_members)
+            print(f"  After Louvain: {len(community_members)} core members")
+        else:
+            print(f"  Keeping heuristic community ({len(community_members)} members)")
+
+    # Convert to list for processing
     community_members = [int(member) for member in community_members]
 
     if not community_members:
         return {"error": "No researchers found for the specified topics."}
 
-
+    # PHASE 3: Community network analysis
     G_community = nx.Graph()
     for researcher_id in community_members:
         G_community.add_node(researcher_id)
@@ -63,7 +224,7 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         if src_int in community_members and dst_int in community_members:
             G_community.add_edge(src_int, dst_int)
 
-
+    # Calculate network metrics
     if len(community_members) > 1:
         centrality = nx.degree_centrality(G_community)
         betweenness = nx.betweenness_centrality(G_community)
@@ -73,24 +234,23 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         centrality, betweenness, clustering = {}, {}, {}
         density = 0
 
-
+    # Get predictions
     importance_predictions = importance_logits.argmax(dim=1) if importance_logits is not None else None
     role_predictions = role_logits.argmax(dim=1) if role_logits is not None else None
     influence_values = influence_scores.squeeze() if influence_scores is not None else None
 
-
+    # Analyze community members
     key_members = []
     other_members = []
 
-    paper_quality_scores = updated_embeddings.get('paper_quality', None)
+    paper_quality_scores = updated_embeddings.get('paper_quality', None) if updated_embeddings else None
     authored_edges = data['researcher', 'authored', 'paper'].edge_index.numpy()
 
     for researcher_id in community_members:
-
         researcher_papers = authored_edges[1][authored_edges[0] == researcher_id]
         topic_specific_papers = len([p for p in researcher_papers if p in relevant_papers])
         total_papers = len(researcher_papers)
-        topic_specialization = topic_specific_papers / max(total_papers, 1)
+        topic_specialization = topic_specific_papers / max(total_papers, 1) if total_papers > 0 else 0
 
         researcher_data = {
             "id": f"R{researcher_id}",
@@ -104,7 +264,7 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
             "topic_specialization_score": topic_specialization
         }
 
-
+        # Determine role
         if role_predictions is not None:
             role_idx = role_predictions[researcher_id].item()
             role_names = ["Community Leader", "Core Member", "Contributor", "Sole Expert"]
@@ -117,6 +277,7 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
             else:
                 researcher_data["role"] = "Contributor"
 
+        # Determine importance
         if importance_predictions is not None:
             importance_idx = importance_predictions[researcher_id].item()
             importance_names = ["Low", "Medium", "High"]
@@ -126,7 +287,7 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
             researcher_data["importance"] = "Medium"
             researcher_data["importance_score"] = 0.5
 
-
+        # Calculate paper quality
         if paper_quality_scores is not None and len(researcher_papers) > 0:
             researcher_data["paper_quality"] = calculate_realistic_paper_quality(
                 updated_embeddings['paper'], researcher_papers, relevant_papers
@@ -134,11 +295,12 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         else:
             researcher_data["paper_quality"] = 0.5
 
+        # Calculate freshness
+        researcher_data["freshness_score"] = calculate_researcher_freshness(
+            researcher_id, data, updated_embeddings.get('paper', None) if updated_embeddings else None
+        )
 
-        researcher_data["freshness_score"] = calculate_researcher_freshness(researcher_id, data,
-                                                                            updated_embeddings.get('paper', None))
-
-
+        # Composite score
         composite_score = (
             researcher_data["importance_score"] * 0.3 +
             researcher_data["global_influence"] * 0.25 +
@@ -148,7 +310,7 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         )
         researcher_data["composite_score"] = min(composite_score, 1.0)
 
-
+        # Determine if key member
         dynamic_threshold = dynamic_key_member_threshold(
             len(community_members),
             np.mean([m['global_influence'] for m in key_members]) if key_members else 0.5
@@ -166,14 +328,14 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         else:
             other_members.append(researcher_data)
 
-
+    # Rank members
     if key_members:
         key_members = topic_specialized_researcher_ranking(key_members, query_topics, data)
 
     if other_members:
         other_members = topic_specialized_researcher_ranking(other_members, query_topics, data)
 
-
+    # Calculate averages
     if key_members + other_members:
         avg_influence = np.mean([m['global_influence'] for m in key_members + other_members])
         avg_paper_quality = np.mean([m.get('paper_quality', 0.5) for m in key_members + other_members])
@@ -181,6 +343,7 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
     else:
         avg_influence, avg_paper_quality, avg_topic_specialization = 0, 0, 0
 
+    # Community metrics
     community_metrics = {
         "size": len(community_members),
         "cohesion": density,
@@ -191,16 +354,14 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         "topic_specialization": avg_topic_specialization,
     }
 
-
+    # Additional metrics
     additional_metrics = calculate_additional_metrics({
         'key_members': key_members,
         'community_metrics': community_metrics
     })
-
-
     community_metrics.update(additional_metrics)
 
-
+    # Enhanced analysis
     enhanced_analysis = {
         "avg_influence": avg_influence,
         "max_influence": np.max(
@@ -223,6 +384,15 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         "community_metrics": community_metrics,
         "enhanced_analysis": enhanced_analysis
     }
+
+
+
+
+def calculate_topic_alignment(community_members, query_topics, embeddings):
+
+    return 0.8  # Default high alignment
+
+
 
 def calculate_realistic_paper_quality(paper_embeddings, researcher_papers, relevant_papers):
 
