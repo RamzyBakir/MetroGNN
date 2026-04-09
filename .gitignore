@@ -1,13 +1,14 @@
-# Ignore everything
-/*
-
-# Do NOT ignore the .gitignore file itself
-!.gitignore
-
-# Do NOT ignore the source folder and files
-!/agents
-!/gnn_pipeline
-!test_full_pipeline.py
-
-# Do NOT ignore README.md
-!README.md
+.env
+.ruff_cache/
+data/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.cache/
+.pytest_cache/
+.mypy_cache/
+.venv/
+models/
+test_full_pipeline.py

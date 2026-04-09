@@ -317,10 +317,10 @@ def create_graph_summary(data, topic_names, filename="saved_results/graph_summar
             f.write(f"- {topic_id}: {topic_name}\n")
 
 
-        if 'researcher' in data.node_types:
-            researcher_features = data['researcher'].x.numpy()
-            f.write(f"\nRESEARCHER STATISTICS:\n")
-            f.write(f"- Average papers per researcher: {np.mean(researcher_features[:, 0]):.1f}\n")
+        if 'author' in data.node_types:
+            researcher_features = data['author'].x.numpy()
+            f.write(f"\nAUTHOR STATISTICS:\n")
+            f.write(f"- Average papers per author: {np.mean(researcher_features[:, 0]):.1f}\n")
             f.write(f"- Average collaborators: {np.mean(researcher_features[:, 1]):.1f}\n")
             f.write(f"- Average years active: {np.mean(researcher_features[:, 3]):.1f}\n")
 
@@ -332,7 +332,7 @@ def create_graph_summary(data, topic_names, filename="saved_results/graph_summar
 def explain_node_features(data, topic_names):
 
     feature_explanations = {
-        'researcher': [
+        'author': [
             "Feature 0: Paper count - Total number of papers published",
             "Feature 1: Collaboration count - Number of collaborators",
             "Feature 2: Topic diversity - How diverse their research topics are (0-1)",

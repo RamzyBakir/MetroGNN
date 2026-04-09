@@ -28,12 +28,14 @@ def create_paper_features(df: pd.DataFrame, topic_info_dict: Dict, tfidf_vectors
     paper_features = np.zeros((num_papers, 7), dtype=np.float32)
     
     # Feature 0: n_citation
-    paper_features[:, 0] = df['n_citation'].values.astype(np.float32)
+    n_citation = pd.to_numeric(df['n_citation'], errors='coerce').fillna(0)
+    paper_features[:, 0] = n_citation.values.astype(np.float32)
     
     # Feature 1: recency (2025 - year, normalized)
     current_year = 2025
     max_age = 10  # Assume papers older than 10 years get max penalty
-    recency = (current_year - df['year'].values).astype(np.float32)
+    years = pd.to_numeric(df['year'], errors='coerce').fillna(current_year - max_age)
+    recency = (current_year - years.values).astype(np.float32)
     paper_features[:, 1] = np.clip(1 - (recency / max_age), 0, 1)  # Newer = higher
     
     # Feature 2: author_count
@@ -43,9 +45,11 @@ def create_paper_features(df: pd.DataFrame, topic_info_dict: Dict, tfidf_vectors
         paper_features[:, 2] = 1.0  # Default if no author info
     
     # Feature 3: title_length (normalized)
-    title_lengths = df['title'].str.len().values.astype(np.float32)
+    title_lengths = df['title'].str.len()
+    # Handle NaN titles explicitly before trying to normalize them
+    title_lengths = pd.to_numeric(title_lengths, errors='coerce').fillna(0)
     max_title_len = 200  # Reasonable max for normalization
-    paper_features[:, 3] = np.clip(title_lengths / max_title_len, 0, 1)
+    paper_features[:, 3] = np.clip(title_lengths.values.astype(np.float32) / max_title_len, 0, 1)
     
     # Feature 4: topic_relevance (max TF-IDF score for assigned topic)
     if tfidf_vectors is not None:
@@ -106,8 +110,16 @@ def create_author_features(df: pd.DataFrame, author_to_idx: Dict[str, int]) -> n
         
         for author_idx in author_indices:
             author_papers[author_idx].append(idx)
-            author_citations[author_idx].append(citations)
-            author_years[author_idx].append(year)
+            try:
+                author_citations[author_idx].append(int(citations))
+            except (ValueError, TypeError):
+                author_citations[author_idx].append(0)
+                
+            try:
+                author_years[author_idx].append(int(year))
+            except (ValueError, TypeError):
+                pass # skip invalid years
+                
             if topic_id >= 0:
                 author_topics[author_idx].add(topic_id)
             

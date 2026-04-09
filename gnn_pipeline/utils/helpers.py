@@ -20,7 +20,7 @@ def dynamic_key_member_threshold(community_size, avg_influence):
 def calculate_researcher_freshness(researcher_id, data, paper_embeddings):
 
     try:
-        authored_edges = data['researcher', 'authored', 'paper'].edge_index.numpy()
+        authored_edges = data['author', 'authored', 'paper'].edge_index.numpy()
         researcher_papers = authored_edges[1][authored_edges[0] == researcher_id]
 
         if len(researcher_papers) == 0:
@@ -84,7 +84,7 @@ def calculate_realistic_paper_quality(paper_embeddings, researcher_papers, relev
 def topic_specialized_researcher_ranking(researchers, query_topics, data):
 
     paper_topic_edges = data['paper', 'has_topic', 'topic'].edge_index.numpy()
-    authored_edges = data['researcher', 'authored', 'paper'].edge_index.numpy()
+    authored_edges = data['author', 'authored', 'paper'].edge_index.numpy()
 
     ranked_researchers = []
     for researcher in researchers:

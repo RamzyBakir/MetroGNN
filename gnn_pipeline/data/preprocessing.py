@@ -5,8 +5,8 @@ import numpy as np
 
 def create_enhanced_training_targets(data):
 
-    num_researchers = data['researcher'].x.shape[0]
-    researcher_feats = data['researcher'].x
+    num_researchers = data['author'].x.shape[0]
+    researcher_feats = data['author'].x
 
     importance_scores = (
         researcher_feats[:, 0] * 0.3 +
@@ -21,7 +21,7 @@ def create_enhanced_training_targets(data):
     importance_targets[importance_scores > quantiles[1]] = 2
 
     role_targets = torch.zeros(num_researchers, dtype=torch.long)
-    collab_edges = data['researcher', 'collaborates_with', 'researcher'].edge_index
+    collab_edges = data['author', 'collaborates_with', 'author'].edge_index
 
     for i in range(num_researchers):
         collab_count = (collab_edges[0] == i).sum().item()
