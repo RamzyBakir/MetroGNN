@@ -101,13 +101,36 @@ class TopicAssigner:
             # Fall back to most common words from titles
             words = []
             stopwords = {
-                "a", "an", "the", "of", "for", "and", "in", "on", "to", "with",
-                "by", "from", "is", "are", "was", "using", "based", "via",
-                "its", "their", "as", "at", "or", "that", "this",
+                "a",
+                "an",
+                "the",
+                "of",
+                "for",
+                "and",
+                "in",
+                "on",
+                "to",
+                "with",
+                "by",
+                "from",
+                "is",
+                "are",
+                "was",
+                "using",
+                "based",
+                "via",
+                "its",
+                "their",
+                "as",
+                "at",
+                "or",
+                "that",
+                "this",
             }
             for t in titles:
                 words.extend(
-                    w.lower() for w in re.findall(r"\b[a-zA-Z]{3,}\b", t)
+                    w.lower()
+                    for w in re.findall(r"\b[a-zA-Z]{3,}\b", t)
                     if w.lower() not in stopwords
                 )
             word_counts = Counter(words)
@@ -227,26 +250,38 @@ def assign_topics_to_dblp(
 if __name__ == "__main__":
     import argparse
 
+    from gnn_pipeline.config import get_path
+
+    default_csv = get_path("data", "csv_path")
+
     parser = argparse.ArgumentParser(description="Assign topics to DBLP papers")
-    parser.add_argument(
-        "--csv", default="data/dblp_with_topics_new.csv", help="Input CSV"
-    )
+    parser.add_argument("--csv", default=default_csv, help="Input CSV")
     parser.add_argument("--n-clusters", type=int, default=8, help="Number of topics")
     parser.add_argument("--auto-k", action="store_true", help="Auto-find best k")
     parser.add_argument(
         "--out-csv", default=None, help="Output CSV (default: overwrite input)"
     )
     parser.add_argument(
-        "--out-topic-info", default="models/topic_info_new.json",
-        help="Output topic info JSON",
+        "--out-topic-info",
+        default=None,
+        help="Output topic info JSON (default: models/topic_info_new.json)",
     )
     args = parser.parse_args()
 
+    if args.out_topic_info is None:
+        import os
+
+        args.out_topic_info = os.path.join(
+            os.path.dirname(get_path("models", "dir")), "topic_info_new.json"
+        )
+
     try:
-        df = pd.read_csv(args.csv, on_bad_lines='skip')
+        df = pd.read_csv(args.csv, on_bad_lines="skip")
     except UnicodeDecodeError:
-        print(f"File {args.csv} could not be read as UTF-8. Retrying with latin-1 encoding...")
-        df = pd.read_csv(args.csv, encoding='latin-1', on_bad_lines='skip')
+        print(
+            f"File {args.csv} could not be read as UTF-8. Retrying with latin-1 encoding..."
+        )
+        df = pd.read_csv(args.csv, encoding="latin-1", on_bad_lines="skip")
     df_new, results, topic_info = assign_topics_to_dblp(
         df, n_clusters=args.n_clusters, auto_k=args.auto_k
     )

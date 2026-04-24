@@ -1,0 +1,30 @@
+# MetroGNN Configuration
+# All paths are relative to the project root (where this file lives).
+
+data:
+  csv_path: "train/DBLP-Citation-network-V18-1-20-25_clean.csv"
+  # Leave topic_json_path empty to auto-generate topics during pipeline
+  topic_json_path: "models/topic_info_new.json"
+
+models:
+  dir: "models"
+  best_model: "models/best_model.pth"
+  best_model_gpu: "models/best_model_gpu.pth"
+  best_model_new: "models/best_model_new.pth"
+  knowledge_graph: "models/knowledge_graph_new.pt"
+  knowledge_graph_data: "models/knowledge_graph_data.pkl"
+  networkx_graph: "models/knowledge_graph_networkx.pkl"
+  vector_store: "models/vector_store_semantic"
+
+output:
+  results_dir: "saved_results"
+  graph_summary: "saved_results/graph_summary.txt"
+  data_dictionary: "saved_results/data_dictionary.txt"
+
+training:
+  epochs: 300
+  hidden_channels: 64
+  out_channels: 32
+  num_layers: 4
+  num_classes: 3
+  n_clusters: 8

@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from gnn_pipeline.config import get_path
 from gnn_pipeline.data.vector_store import PaperVectorStore
 from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
 
@@ -28,15 +29,15 @@ class GNNInferencer:
 
     def __init__(
         self,
-        model_path: str = "models/best_model_new.pth",
-        graph_path: str = "models/knowledge_graph_new.pt",
-        papers_csv: str = "data/DBLP-Citation-network-V18-1-2025_with_topics.csv",
-        vector_store_dir: str = "models/vector_store_semantic",
+        model_path: Optional[str] = None,
+        graph_path: Optional[str] = None,
+        papers_csv: Optional[str] = None,
+        vector_store_dir: Optional[str] = None,
     ):
-        self.model_path = model_path
-        self.graph_path = graph_path
-        self.papers_csv = papers_csv
-        self.vector_store_dir = vector_store_dir
+        self.model_path = model_path or get_path("models", "best_model_new")
+        self.graph_path = graph_path or get_path("models", "knowledge_graph")
+        self.papers_csv = papers_csv or get_path("data", "csv_path")
+        self.vector_store_dir = vector_store_dir or get_path("models", "vector_store")
 
         # Lazy-loaded
         self._model: Optional[AdvancedHeteroGCN] = None

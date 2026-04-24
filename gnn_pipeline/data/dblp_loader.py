@@ -112,7 +112,9 @@ def get_dataset_statistics(df: pd.DataFrame, author_to_idx: Dict[str, int]) -> D
 
 if __name__ == "__main__":
     # Test the loader
-    csv_path = "/home/ramzy/Documents/Uni/metrognn/data/dblp_subset.csv"
+    from gnn_pipeline.config import get_path
+
+    csv_path = get_path("data", "csv_path")
 
     print("=" * 60)
     print("Loading DBLP Data")

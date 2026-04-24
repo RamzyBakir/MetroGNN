@@ -15,5 +15,10 @@ chromadb>=0.3.0
 # Utilities
 networkx>=2.6
 
+# Configuration
+pyyaml>=5.4
+
 # Optional: For visualization (if used)
 matplotlib>=3.4.0
+seaborn>=0.11.0
+scipy>=1.7.0
