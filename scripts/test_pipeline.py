@@ -35,7 +35,7 @@ from gnn_pipeline.data.feature_engineering import (
 from gnn_pipeline.data.graph_builder import build_knowledge_graph_from_dblp
 from gnn_pipeline.data.topic_assignment import TopicAssigner, assign_topics_to_dblp
 from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
-from gnn_pipeline.models.training import train_enhanced_model
+from gnn_pipeline.models.training import set_external_data, train_enhanced_model
 from gnn_pipeline.strategy.components import (
     DynamicContentGenerator,
     PersonalizedPlanAssembler,
@@ -147,6 +147,8 @@ def test_full_pipeline():
             num_classes=get_value("training", "num_classes"),
         )
 
+        set_external_data(df_with_topics, author_to_idx)
+
         model, losses, val_metrics, imp_logits, role_logits, inf_scores = (
             train_enhanced_model(model, data, epochs=50)
         )
@@ -201,7 +203,7 @@ def test_full_pipeline():
     print("\nPipeline Components Validated:")
     print("  ✓ Data loading and preprocessing")
     print(f"  ✓ Dynamic topic assignment (k={n_clusters})")
-    print("  ✓ Feature engineering (7 paper, 9 author dims)")
+    print("  ✓ Feature engineering (7 paper, 6 author dims)")
     print("  ✓ Knowledge graph construction")
     print("  ✓ GNN model training (50 epochs)")
     print("  ✓ Dynamic topic detection (TF-IDF similarity)")

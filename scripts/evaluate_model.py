@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from gnn_pipeline.config import ensure_dirs, get_path, get_value
 from gnn_pipeline.evaluation import GNNEvaluator, StatisticalTester
 from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
+from gnn_pipeline.models.training import set_external_data
 
 
 def load_model_and_graph(device: str):
@@ -75,6 +78,64 @@ def load_model_and_graph(device: str):
     return model, graph
 
 
+def load_split_indices():
+    splits_path = get_path("models", "splits_path")
+    if os.path.isfile(splits_path):
+        split_data = torch.load(splits_path, map_location="cpu", weights_only=False)
+        print(f"Loaded split indices from {splits_path}")
+        return split_data["train_idx"], split_data["val_idx"]
+    else:
+        raise FileNotFoundError(
+            f"Split indices not found at {splits_path}. "
+            "Run scripts/train_pipeline.py first to generate them."
+        )
+
+
+def setup_external_data():
+    csv_path = get_path("data", "csv_path")
+    topic_json_path = get_path("data", "topic_json_path")
+
+    df = pd.read_csv(csv_path)
+
+    topic_info_dict = {}
+    if topic_json_path and os.path.isfile(topic_json_path):
+        with open(topic_json_path, "r") as f:
+            topic_info_dict = json.load(f)
+            topic_info_dict = {int(k): v for k, v in topic_info_dict.items()}
+    else:
+        from gnn_pipeline.data.topic_assignment import assign_topics_to_dblp
+
+        n_clusters = get_value("training", "n_clusters")
+        df, _, topic_info_dict = assign_topics_to_dblp(df, n_clusters=n_clusters)
+
+    def parse_authors(authors_str):
+        try:
+            authors = json.loads(authors_str.replace("'", '"'))
+            return (
+                [str(a).strip() for a in authors] if isinstance(authors, list) else []
+            )
+        except Exception:
+            try:
+                authors = eval(authors_str)
+                return (
+                    [str(a).strip() for a in authors]
+                    if isinstance(authors, list)
+                    else []
+                )
+            except Exception:
+                return []
+
+    df["authors_parsed"] = df["authors"].apply(parse_authors)
+    all_authors = []
+    for al in df["authors_parsed"]:
+        all_authors.extend(al)
+    unique_authors = list(sorted(set(all_authors)))
+    author_to_idx = {author: idx for idx, author in enumerate(unique_authors)}
+
+    set_external_data(df, author_to_idx)
+    return df, author_to_idx
+
+
 def run_evaluation(model, graph, device, save_dir):
     evaluator = GNNEvaluator(device=device)
     results_dir = get_path("output", "results_dir") if save_dir is None else save_dir
@@ -82,10 +143,11 @@ def run_evaluation(model, graph, device, save_dir):
 
     targets = evaluator._generate_targets_from_data(graph)
 
-    num_authors = graph["author"].num_nodes
-    indices = torch.randperm(num_authors, generator=torch.Generator().manual_seed(42))
-    train_idx = indices[: int(0.7 * num_authors)]
-    test_idx = indices[int(0.7 * num_authors) :]
+    _, test_idx = load_split_indices()
+
+    print(
+        f"\nUsing saved split: test set has {len(test_idx)} authors (never seen during training)"
+    )
 
     print("\n" + "=" * 70)
     print("FULL GRAPH EVALUATION")
@@ -333,6 +395,9 @@ def main():
     print(f"Device: {device}")
 
     model, graph = load_model_and_graph(device)
+
+    print("Setting up external data for target generation...")
+    setup_external_data()
 
     full_metrics, test_metrics, evaluator, targets, test_idx = run_evaluation(
         model, graph, device, args.save_dir

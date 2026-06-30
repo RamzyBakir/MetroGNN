@@ -15,6 +15,7 @@ models:
   knowledge_graph_data: "models/knowledge_graph_data.pkl"
   networkx_graph: "models/knowledge_graph_networkx.pkl"
   vector_store: "models/vector_store_semantic"
+  splits_path: "models/split_indices.pt"
 
 output:
   results_dir: "saved_results"

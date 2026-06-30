@@ -126,6 +126,9 @@ def build_and_train():
         num_classes=get_value("training", "num_classes"),
         num_topics=num_topics,
     )
+    from gnn_pipeline.models.training import set_external_data
+
+    set_external_data(df, author_to_idx)
 
     print("\n5. Training GNN...")
     epochs = get_value("training", "epochs")
