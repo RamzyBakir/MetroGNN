@@ -2,64 +2,208 @@ import numpy as np
 import torch
 import torch.optim as optim
 from sklearn.metrics import accuracy_score
+import pandas as pd
+import os
 
-from gnn_pipeline.config import get_path
-from gnn_pipeline.utils.visualization import plot_training_history
+
+try:
+    from gnn_pipeline.config import get_path
+
+    HAS_CONFIG = True
+except ImportError:
+    HAS_CONFIG = False
+    get_path = lambda *args: "models/best_model.pth"
+
+try:
+    from gnn_pipeline.utils.visualization import plot_training_history
+
+    HAS_VISUALIZATION = True
+except ImportError:
+    HAS_VISUALIZATION = False
+
+    def plot_training_history(*args, **kwargs):
+        pass
+
+
+# ==============================================================================
+# EXTERNAL DATA REQUIRED
+# ==============================================================================
+
+_external_df = None
+_external_author_to_idx = None
+
+
+def set_external_data(df: pd.DataFrame, author_to_idx: dict):
+    """
+    REQUIRED: Set external data for valid importance prediction.
+    Must be called BEFORE train_enhanced_model().
+    """
+    global _external_df, _external_author_to_idx
+    _external_df = df
+    _external_author_to_idx = author_to_idx
+    print(f"External data set: {len(df)} papers, {len(author_to_idx)} authors")
 
 
 def create_enhanced_training_targets(data):
+    """
+    Create training targets from EXTERNAL data ONLY.
 
-    num_authors = data["author"].x.shape[0]
-    author_feats = data["author"].x
+    IMPORTANT: This function NO LONGER uses author_feats to create targets.
+    Targets come exclusively from paper citation data (n_citation, year).
 
-    importance_scores = (
-        author_feats[:, 0] * 0.3 + author_feats[:, 1] * 0.2 + author_feats[:, 4] * 0.5
+    Raises:
+        RuntimeError: If set_external_data() was not called first.
+    """
+    global _external_df, _external_author_to_idx
+
+    # ================================================================
+    # REQUIRE EXTERNAL DATA - NO FALLBACK TO CIRCULAR DEPENDENCY
+    # ================================================================
+    if _external_df is None or _external_author_to_idx is None:
+        raise RuntimeError(
+            "\n" + "=" * 70 + "\n"
+            "ERROR: External data not set!\n"
+            "You MUST call set_external_data(df, author_to_idx) BEFORE training.\n"
+            "This ensures targets come from external citation data, not input features.\n"
+            "Example:\n"
+            "  from training import set_external_data, train_enhanced_model\n"
+            "  set_external_data(df, author_to_idx)\n"
+            "  model, losses, ... = train_enhanced_model(model, data)\n"
+            "=" * 70
+        )
+
+    print(
+        "\n[INFO] Creating targets from EXTERNAL citation data (no circular dependency)"
     )
 
-    quantiles = torch.quantile(importance_scores, torch.tensor([0.25, 0.75]))
-    importance_targets = torch.zeros(num_authors, dtype=torch.long)
-    importance_targets[importance_scores <= quantiles[0]] = 0
-    importance_targets[
-        (importance_scores > quantiles[0]) & (importance_scores <= quantiles[1])
-    ] = 1
-    importance_targets[importance_scores > quantiles[1]] = 2
+    df = _external_df
+    author_to_idx = _external_author_to_idx
 
+    num_authors = len(author_to_idx)
+
+    # Get authorship edges from graph
+    authored_edges = data["author", "authored", "paper"].edge_index
+    paper_ids = authored_edges[1].cpu().numpy()
+    author_ids = authored_edges[0].cpu().numpy()
+
+    # ================================================================
+    # IMPORTANCE TARGETS (from paper citations - EXTERNAL)
+    # ================================================================
+    paper_citations = pd.to_numeric(df["n_citation"], errors="coerce").fillna(0).values
+    paper_years = pd.to_numeric(df["year"], errors="coerce").fillna(2025).values
+
+    current_year = 2025
+    citation_velocity = np.zeros(len(paper_citations))
+    for i, year in enumerate(paper_years):
+        age = max(1, int(current_year - year))
+        citation_velocity[i] = paper_citations[i] / age
+
+    # Paper importance (ONLY from external data - NOT from author features)
+    paper_importance = paper_citations * 0.6 + citation_velocity * 0.4
+
+    # Aggregate to authors (sum of paper importance)
+    author_importance = np.zeros(num_authors)
+    for author_id, paper_id in zip(author_ids, paper_ids):
+        if paper_id < len(paper_importance):
+            author_importance[author_id] += paper_importance[paper_id]
+
+    # Percentile-based labels (3 classes)
+    percentiles = np.argsort(np.argsort(author_importance)) / num_authors
+
+    importance_targets = torch.zeros(num_authors, dtype=torch.long)
+    importance_targets[percentiles <= 0.33] = 0  # Low
+    importance_targets[(percentiles > 0.33) & (percentiles <= 0.66)] = 1  # Medium
+    importance_targets[percentiles > 0.66] = 2  # High
+
+    # ================================================================
+    # ROLE TARGETS (from graph degree - EXTERNAL metric)
+    # ================================================================
     role_targets = torch.zeros(num_authors, dtype=torch.long)
     collab_edges = data["author", "collaborates_with", "author"].edge_index
 
-    for i in range(num_authors):
-        collab_count = (collab_edges[0] == i).sum().item()
-        if collab_count == 0:
-            role_targets[i] = 3
-        elif collab_count > 6:
-            role_targets[i] = 0
-        elif collab_count > 3:
-            role_targets[i] = 1
-        else:
-            role_targets[i] = 2
+    degree = torch.zeros(num_authors)
+    for i in range(collab_edges.shape[1]):
+        src = collab_edges[0, i].item()
+        degree[src] += 1
 
-    influence_targets = (importance_scores - importance_scores.min()) / (
-        importance_scores.max() - importance_scores.min()
+    degree_percentiles = np.percentile(degree.numpy(), [50, 75])
+    for i in range(num_authors):
+        deg = degree[i].item()
+        if deg == 0:
+            role_targets[i] = 3  # Sole Expert
+        elif deg > degree_percentiles[1]:
+            role_targets[i] = 0  # Leader
+        elif deg > degree_percentiles[0]:
+            role_targets[i] = 1  # Core
+        else:
+            role_targets[i] = 2  # Contributor
+
+    # ================================================================
+    # INFLUENCE TARGETS (from citation velocity - EXTERNAL)
+    # ================================================================
+    author_velocity = np.zeros(num_authors)
+    for author_id, paper_id in zip(author_ids, paper_ids):
+        if paper_id < len(citation_velocity):
+            author_velocity[author_id] += citation_velocity[paper_id]
+
+    if author_velocity.max() > author_velocity.min():
+        influence_targets = (author_velocity - author_velocity.min()) / (
+            author_velocity.max() - author_velocity.min()
+        )
+    else:
+        influence_targets = np.zeros(num_authors)
+    influence_targets = torch.tensor(influence_targets, dtype=torch.float32)
+
+    # Print summary
+    print(
+        f"\n  Importance: Low={sum(importance_targets == 0)}, Medium={sum(importance_targets == 1)}, High={sum(importance_targets == 2)}"
+    )
+    print(
+        f"  Role: Leader={sum(role_targets == 0)}, Core={sum(role_targets == 1)}, Contributor={sum(role_targets == 2)}, Sole={sum(role_targets == 3)}"
+    )
+    print(
+        f"  Influence: min={influence_targets.min():.3f}, max={influence_targets.max():.3f}, mean={influence_targets.mean():.3f}"
     )
 
     return importance_targets, role_targets, influence_targets
 
 
 def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
+    """
+    Train MetroGNN model with multi-task learning using EXTERNAL ground truth.
 
-    if checkpoint_path is None:
+    IMPORTANT: Call set_external_data(df, author_to_idx) BEFORE this function.
+    """
+    if checkpoint_path is None and HAS_CONFIG:
         checkpoint_path = get_path("models", "best_model")
+    elif checkpoint_path is None:
+        os.makedirs("models", exist_ok=True)
+        checkpoint_path = "models/best_model.pth"
 
+    print("=" * 60)
     print("Starting enhanced training with multi-task learning")
+    print("Using EXTERNAL ground truth (no circular dependency)")
+    print("=" * 60)
 
+    # Create targets from EXTERNAL data only
     importance_targets, role_targets, influence_targets = (
         create_enhanced_training_targets(data)
     )
 
     num_researchers = len(importance_targets)
-    indices = torch.randperm(num_researchers)
+    generator = torch.Generator().manual_seed(42)
+    indices = torch.randperm(num_researchers, generator=generator)
     train_idx = indices[: int(0.7 * num_researchers)]
     val_idx = indices[int(0.7 * num_researchers) :]
+
+    if HAS_CONFIG:
+        try:
+            splits_path = get_path("models", "splits_path")
+            os.makedirs(os.path.dirname(splits_path), exist_ok=True)
+            torch.save({"train_idx": train_idx, "val_idx": val_idx}, splits_path)
+            print(f"Split indices saved to {splits_path}")
+        except Exception as e:
+            print(f"Warning: Could not save split indices: {e}")
 
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -77,7 +221,7 @@ def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
     grad_clip_value = 1.0
 
     print(
-        f"Training on {len(train_idx)} researchers, validating on {len(val_idx)} researchers"
+        f"\nTraining on {len(train_idx)} researchers, validating on {len(val_idx)} researchers"
     )
     print(
         f"Class distribution - Importance: {torch.bincount(importance_targets).tolist()}"
@@ -115,6 +259,7 @@ def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_value)
             optimizer.step()
 
+            # Validation
             model.eval()
             with torch.no_grad():
                 try:
@@ -170,17 +315,11 @@ def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
             if val_total_loss < best_val_loss:
                 best_val_loss = val_total_loss
                 patience_counter = 0
-
                 torch.save(model.state_dict(), checkpoint_path)
             else:
                 patience_counter += 1
 
-            if (
-                epoch % 20 == 0
-                or epoch == epochs - 1
-                or patience_counter == 0
-                or patience_counter >= patience - 5
-            ):
+            if epoch % 20 == 0 or epoch == epochs - 1:
                 current_lr = optimizer.param_groups[0]["lr"]
                 print(f"Epoch {epoch:03d}/{epochs}:")
                 print(
@@ -194,12 +333,6 @@ def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
                 if patience_counter > 0:
                     print(f"  Early stopping: {patience_counter}/{patience}")
 
-                if len(train_losses) > 10:
-                    recent_losses = train_losses[-10:]
-                    loss_std = np.std(recent_losses)
-                    if loss_std < 0.01:
-                        print(f"Training stabilized (loss std: {loss_std:.4f})")
-
             if patience_counter >= patience:
                 print(f"Early stopping triggered at epoch {epoch}")
                 break
@@ -207,12 +340,14 @@ def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
         else:
             print(f"Warning: No predictions returned at epoch {epoch}")
 
+    # Load best model
     try:
         model.load_state_dict(torch.load(checkpoint_path))
         print("Loaded best model from training")
     except:
         print("Could not load best model, using final model")
 
+    # Final evaluation
     model.eval()
     with torch.no_grad():
         try:
@@ -230,20 +365,11 @@ def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
                 final_inf_scores.squeeze() - influence_targets
             ).mean()
 
-            print(f"\n=== ENHANCED FINAL PERFORMANCE ===")
+            print(f"\n=== FINAL PERFORMANCE (External Ground Truth) ===")
             print(f"Importance Accuracy: {final_imp_acc:.4f} ({final_imp_acc:.1%})")
             print(f"Role Accuracy: {final_role_acc:.4f} ({final_role_acc:.1%})")
             print(f"Influence MAE: {final_inf_mae:.4f}")
             print(f"Final Training Loss: {train_losses[-1]:.6f}")
-
-            if final_imp_acc >= 0.8 and final_role_acc >= 0.8 and final_inf_mae <= 0.15:
-                print(" EXCELLENT: Model achieved high performance across all tasks!")
-            elif (
-                final_imp_acc >= 0.7 and final_role_acc >= 0.7 and final_inf_mae <= 0.2
-            ):
-                print(" GOOD: Model performed well on primary tasks")
-            else:
-                print("️ MODERATE: Consider tuning hyperparameters or architecture")
 
             return (
                 model,
@@ -256,87 +382,4 @@ def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
 
         except Exception as e:
             print(f"Error in final evaluation: {e}")
-            final_imp_acc, final_role_acc, final_inf_mae = 0, 0, 1.0
             return model, train_losses, val_metrics, None, None, None
-
-    plt.figure(figsize=(15, 5))
-
-    plt.subplot(1, 3, 1)
-    plt.plot(train_losses, label="Training Loss", alpha=0.7, color="blue", linewidth=2)
-    val_losses = [m[3] for m in val_metrics] if val_metrics else []
-    if val_losses:
-        plt.plot(
-            val_losses, label="Validation Loss", alpha=0.7, color="red", linewidth=2
-        )
-
-        best_epoch = np.argmin(val_losses)
-        plt.scatter(
-            best_epoch,
-            val_losses[best_epoch],
-            color="green",
-            s=100,
-            label="Best Model",
-            zorder=5,
-        )
-    plt.title("Training & Validation Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    plt.subplot(1, 3, 2)
-    val_imp_accs = [m[0] for m in val_metrics] if val_metrics else []
-    val_role_accs = [m[1] for m in val_metrics] if val_metrics else []
-
-    if val_imp_accs:
-        plt.plot(
-            val_imp_accs,
-            label="Importance Accuracy",
-            alpha=0.7,
-            color="green",
-            linewidth=2,
-        )
-    if val_role_accs:
-        plt.plot(
-            val_role_accs, label="Role Accuracy", alpha=0.7, color="orange", linewidth=2
-        )
-    plt.title("Validation Accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    plt.subplot(1, 3, 3)
-    val_inf_maes = [m[2] for m in val_metrics] if val_metrics else []
-    if val_inf_maes:
-        plt.plot(
-            val_inf_maes, label="Influence MAE", color="red", alpha=0.7, linewidth=2
-        )
-
-        best_mae_epoch = np.argmin(val_inf_maes)
-        plt.scatter(
-            best_mae_epoch,
-            val_inf_maes[best_mae_epoch],
-            color="purple",
-            s=100,
-            label="Best MAE",
-            zorder=5,
-        )
-    plt.title("Influence Score MAE")
-    plt.xlabel("Epoch")
-    plt.ylabel("MAE")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
-    plot_training_history(train_losses, val_metrics)
-
-    return (
-        model,
-        train_losses,
-        val_metrics,
-        final_imp_logits,
-        final_role_logits,
-        final_inf_scores,
-    )

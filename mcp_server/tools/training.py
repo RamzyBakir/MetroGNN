@@ -13,7 +13,7 @@ from gnn_pipeline.data.graph_builder import build_knowledge_graph_from_dblp
 from gnn_pipeline.data.topic_assignment import TopicAssigner, assign_topics_to_dblp
 from gnn_pipeline.data.vector_store import PaperVectorStore
 from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
-from gnn_pipeline.models.training import train_enhanced_model
+from gnn_pipeline.models.training import set_external_data, train_enhanced_model
 
 from mcp_server.models.schemas import (
     BuildVectorStoreInput,
@@ -172,6 +172,8 @@ async def train_pipeline(
     await ctx.report_progress(
         progress=0.35, total=1.0, message=f"Training for {epochs} epochs..."
     )
+
+    set_external_data(df, author_to_idx)
 
     model, train_losses, val_metrics, imp_logits, role_logits, inf_scores = (
         train_enhanced_model(

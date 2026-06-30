@@ -1,5 +1,6 @@
 """GPU-optimized training with mixed precision and mini-batch support"""
 
+import os
 import numpy as np
 import torch
 import torch.optim as optim
@@ -9,45 +10,17 @@ from torch_geometric.utils import scatter
 
 from gnn_pipeline.config import get_path
 from gnn_pipeline.utils.visualization import plot_training_history
+from gnn_pipeline.models.training import (
+    set_external_data,
+    _external_df,
+    _external_author_to_idx,
+)
 
 
 def create_enhanced_training_targets(data):
-    """Create training targets (same as CPU version)"""
+    from gnn_pipeline.models.training import create_enhanced_training_targets as _create
 
-    num_authors = data["author"].x.shape[0]
-    author_feats = data["author"].x
-
-    importance_scores = (
-        author_feats[:, 0] * 0.3 + author_feats[:, 1] * 0.2 + author_feats[:, 4] * 0.5
-    )
-
-    quantiles = torch.quantile(importance_scores, torch.tensor([0.25, 0.75]))
-    importance_targets = torch.zeros(num_authors, dtype=torch.long)
-    importance_targets[importance_scores <= quantiles[0]] = 0
-    importance_targets[
-        (importance_scores > quantiles[0]) & (importance_scores <= quantiles[1])
-    ] = 1
-    importance_targets[importance_scores > quantiles[1]] = 2
-
-    role_targets = torch.zeros(num_authors, dtype=torch.long)
-    collab_edges = data["author", "collaborates_with", "author"].edge_index
-
-    for i in range(num_authors):
-        collab_count = (collab_edges[0] == i).sum().item()
-        if collab_count == 0:
-            role_targets[i] = 3
-        elif collab_count > 6:
-            role_targets[i] = 0
-        elif collab_count > 3:
-            role_targets[i] = 1
-        else:
-            role_targets[i] = 2
-
-    influence_targets = (importance_scores - importance_scores.min()) / (
-        importance_scores.max() - importance_scores.min()
-    )
-
-    return importance_targets, role_targets, influence_targets
+    return _create(data)
 
 
 def train_enhanced_model_gpu(
@@ -92,9 +65,18 @@ def train_enhanced_model_gpu(
     )
 
     num_researchers = len(importance_targets)
-    indices = torch.randperm(num_researchers)
+    generator = torch.Generator().manual_seed(42)
+    indices = torch.randperm(num_researchers, generator=generator)
     train_idx = indices[: int(0.7 * num_researchers)]
     val_idx = indices[int(0.7 * num_researchers) :]
+
+    try:
+        splits_path = get_path("models", "splits_path")
+        os.makedirs(os.path.dirname(splits_path), exist_ok=True)
+        torch.save({"train_idx": train_idx, "val_idx": val_idx}, splits_path)
+        print(f"Split indices saved to {splits_path}")
+    except Exception as e:
+        print(f"Warning: Could not save split indices: {e}")
 
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
