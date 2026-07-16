@@ -82,9 +82,39 @@ Relations:
 Only references to papers present in the configured subset become citation edges.
 Coverage is recorded in the pipeline manifest.
 
-## Next research phase
+## Temporal recommendation evaluation
 
-The next phase must define recommendation ground truth, temporal train/validation/
-test splits, retrieval and ranking baselines, repeated runs, and statistical tests
-computed from actual predictions. Existing synthetic significance outputs should
-not be included in an academic submission.
+The primary offline task is prior-work recommendation: a query paper's title,
+abstract, and keywords are used to rank papers published in strictly earlier
+years. Internal citations provide incomplete binary qrels; uncited candidates are
+unjudged rather than confirmed irrelevant.
+
+The main protocol uses 2021-2022 for training queries, 2023 for validation, and
+2024 for the final test. Snapshot citation counts are excluded from temporal
+popularity signals. Build the versioned benchmark with:
+
+```bash
+python scripts/build_recommendation_benchmark.py
+```
+
+Run configured full-corpus baselines with:
+
+```bash
+python scripts/evaluate_recommenders.py \
+  --proposed seeded_ppr --baseline tfidf
+```
+
+The default non-neural methods are random, historical citation popularity,
+recency, TF-IDF, BM25, and semantic-seeded Personalized PageRank. MiniLM and a
+scholarly embedding adapter are implemented but disabled by default to prevent
+accidental expensive encoding. Every ranked item, seed, latency, per-query
+metric, bootstrap interval, and paired comparison is persisted.
+
+Learned systems should use at least five seeds. Confidence intervals bootstrap
+actual matched queries after averaging seeds; paired randomization and Wilcoxon
+tests operate on observed per-query differences with Holm correction.
+
+The sparse citation benchmark is suitable as an automated pilot but should be
+supplemented by an expanded citation corpus or human graded relevance judgments
+for the paper. Existing synthetic significance outputs should not be included in
+an academic submission.

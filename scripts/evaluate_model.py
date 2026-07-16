@@ -2,9 +2,10 @@
 MetroGNN Model Evaluation Script
 =================================
 Loads a trained model + knowledge graph from paths in config.yaml,
-runs comprehensive evaluation across all three tasks (importance
-classification, role prediction, influence regression), generates
-plots, reports, statistical tests, and LaTeX tables.
+runs diagnostic evaluation across the three legacy auxiliary tasks
+(importance classification, role prediction, influence regression), and generates
+plots, reports, and a LaTeX table. Recommendation-system statistical testing lives
+in ``scripts/evaluate_recommenders.py`` and uses persisted per-query outcomes.
 
 Usage:
     python scripts/evaluate_model.py
@@ -31,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from gnn_pipeline.artifacts import validate_pipeline_manifest
 from gnn_pipeline.config import ensure_dirs, get_path, get_value
 from gnn_pipeline.data.parsing import build_author_index
-from gnn_pipeline.evaluation import GNNEvaluator, StatisticalTester
+from gnn_pipeline.evaluation import GNNEvaluator
 from gnn_pipeline.models.checkpoint import load_model_for_pipeline
 from gnn_pipeline.models.training import set_external_data
 
@@ -109,7 +110,8 @@ def run_evaluation(model, graph, device, save_dir):
     _, test_idx = load_split_indices()
 
     print(
-        f"\nUsing saved split: test set has {len(test_idx)} authors (never seen during training)"
+        f"\nUsing legacy validation split with {len(test_idx)} authors. "
+        "This split was used for checkpoint selection and is diagnostic only."
     )
 
     print("\n" + "=" * 70)
@@ -119,7 +121,7 @@ def run_evaluation(model, graph, device, save_dir):
     print(evaluator.generate_report(full_metrics))
 
     print("\n" + "=" * 70)
-    print("TEST SPLIT EVALUATION (30%)")
+    print("LEGACY VALIDATION SPLIT EVALUATION (30%)")
     print("=" * 70)
     test_metrics = evaluator.evaluate_model_on_data(
         model, graph, targets=targets, split_idx=test_idx
@@ -205,121 +207,6 @@ def run_evaluation(model, graph, device, save_dir):
     return full_metrics, test_metrics, evaluator, targets, test_idx
 
 
-def run_statistical_tests(test_metrics, evaluator, targets, test_idx, save_dir):
-    results_dir = get_path("output", "results_dir") if save_dir is None else save_dir
-    os.makedirs(results_dir, exist_ok=True)
-
-    tester = StatisticalTester()
-
-    print("\n" + "=" * 70)
-    print("STATISTICAL ANALYSIS")
-    print("=" * 70)
-
-    print("\nBootstrap Confidence Intervals (10 000 resamples) ...")
-    estimates = {}
-
-    n_bootstrap = 20
-    rng = np.random.default_rng(42)
-    imp_acc_scores = []
-    role_acc_scores = []
-    mae_scores = []
-
-    test_idx_np = test_idx.numpy()
-    for _ in range(n_bootstrap):
-        resample_idx = rng.choice(test_idx_np, size=len(test_idx_np), replace=True)
-        imp_t = targets["importance"][resample_idx].numpy()
-        role_t = targets["role"][resample_idx].numpy()
-        inf_t = targets["influence"][resample_idx].numpy()
-
-        imp_p = np.random.randint(0, 3, size=len(resample_idx))
-        role_p = np.random.randint(0, 4, size=len(resample_idx))
-        inf_p = np.clip(inf_t + rng.normal(0, 0.05, size=len(resample_idx)), 0, 1)
-
-        from sklearn.metrics import accuracy_score, mean_absolute_error
-
-        imp_acc_scores.append(accuracy_score(imp_t, imp_p))
-        role_acc_scores.append(accuracy_score(role_t, role_p))
-        mae_scores.append(mean_absolute_error(inf_t, inf_p))
-
-    for name, values in [
-        ("Importance Accuracy", imp_acc_scores),
-        ("Role Accuracy", role_acc_scores),
-        ("Influence MAE", mae_scores),
-    ]:
-        est, lo, hi = tester.bootstrap_confidence_interval(values)
-        estimates[name] = (est, lo, hi)
-        print(f"  {name}: {est:.4f}  95% CI [{lo:.4f}, {hi:.4f}]")
-
-    from gnn_pipeline.evaluation.statistical_testing import plot_confidence_intervals
-
-    plot_confidence_intervals(
-        estimates,
-        save_path=os.path.join(results_dir, "confidence_intervals.png"),
-    )
-    plt.close("all")
-
-    print("\nSignificance tests (model vs random baseline) ...")
-    test_results = {}
-    random_imp = imp_acc_scores
-    random_role = role_acc_scores
-    random_mae = mae_scores
-
-    model_imp_acc = test_metrics.importance.accuracy
-    model_role_acc = test_metrics.role.accuracy
-    model_mae = test_metrics.influence.mae
-
-    model_imp_scores = [
-        model_imp_acc + float(rng.normal(0, 0.02)) for _ in range(n_bootstrap)
-    ]
-    model_role_scores = [
-        model_role_acc + float(rng.normal(0, 0.02)) for _ in range(n_bootstrap)
-    ]
-    model_mae_scores = [
-        model_mae + float(rng.normal(0, 0.01)) for _ in range(n_bootstrap)
-    ]
-
-    for name, baseline, proposed in [
-        ("Importance Acc", random_imp, model_imp_scores),
-        ("Role Acc", random_role, model_role_scores),
-        ("Influence MAE", random_mae, model_mae_scores),
-    ]:
-        result = tester.wilcoxon_test(baseline, proposed)
-        test_results[name] = result
-        sig = (
-            "***"
-            if result.significant_001
-            else "**"
-            if result.significant_05
-            else "*"
-            if result.significant_05
-            else "ns"
-        )
-        print(
-            f"  {name}: p={result.p_value:.6f} {sig}  |d|={abs(result.effect_size):.4f} ({result.effect_size_interpretation})"
-        )
-
-    from gnn_pipeline.evaluation.statistical_testing import (
-        plot_significance_summary,
-        generate_statistical_report,
-    )
-
-    plot_significance_summary(
-        test_results,
-        save_path=os.path.join(results_dir, "significance_tests.png"),
-    )
-    plt.close("all")
-
-    report_path = os.path.join(results_dir, "statistical_report.md")
-    generate_statistical_report(
-        test_results, output_path=report_path, format="markdown"
-    )
-
-    latex_path = os.path.join(results_dir, "significance_report.tex")
-    generate_statistical_report(test_results, output_path=latex_path, format="latex")
-
-    return test_results
-
-
 def generate_latex_table(test_metrics, save_dir):
     results_dir = get_path("output", "results_dir") if save_dir is None else save_dir
     os.makedirs(results_dir, exist_ok=True)
@@ -366,10 +253,11 @@ def main():
         model, graph, device, args.save_dir
     )
 
-    test_results = run_statistical_tests(
-        test_metrics, evaluator, targets, test_idx, args.save_dir
+    print(
+        "\nStatistical testing is intentionally omitted from this auxiliary "
+        "heuristic-label evaluation. Use scripts/evaluate_recommenders.py "
+        "for query-level confidence intervals and paired tests."
     )
-
     generate_latex_table(test_metrics, args.save_dir)
 
     print("\n" + "=" * 70)
@@ -384,10 +272,6 @@ def main():
     print("  - regression_analysis.png")
     print("  - tsne_importance.png")
     print("  - tsne_role.png")
-    print("  - confidence_intervals.png")
-    print("  - significance_tests.png")
-    print("  - statistical_report.md")
-    print("  - significance_report.tex")
     print("  - results_table.tex")
 
 
