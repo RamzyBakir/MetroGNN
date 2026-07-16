@@ -1,7 +1,9 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
+
+from pydantic import Field
 
 from mcp.server.fastmcp import Context
 
@@ -40,11 +42,17 @@ def _ensure_topic_info(app):
                 app.topic_names = {
                     int(k): v.get("name", f"Topic {k}") for k, v in raw.items()
                 }
-        except Exception:
-            pass
+                from gnn_pipeline.data.topic_assignment import TopicAssigner
+
+                app.topic_assigner = TopicAssigner.from_centroids(
+                    get_path("data", "topic_centroids_path")
+                )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("Could not load topic artifacts: %s", exc)
         if app.topic_names is None:
-            app.topic_names = {}
-            app.topic_info_dict = {}
+            raise RuntimeError(
+                "Versioned topic metadata/centroids are unavailable. Build the v2 pipeline first."
+            )
 
 
 def _detect_topic_ids(app, query: str) -> List[int]:
@@ -58,7 +66,7 @@ def _detect_topic_ids(app, query: str) -> List[int]:
 
     try:
         if app.topic_assigner is not None and hasattr(
-            app.topic_assigner, "preprocess_text"
+            app.topic_assigner, "rank_query_topics"
         ):
             detected = extract_topics_from_query_dynamic(
                 query, app.topic_assigner, topic_info
@@ -77,8 +85,8 @@ def _detect_topic_ids(app, query: str) -> List[int]:
 
 @mcp.tool()
 async def detect_topics(
-    query: str,
-    method: str = "dynamic",
+    query: Annotated[str, Field(min_length=1, max_length=2000)],
+    method: Literal["dynamic", "keyword"] = "dynamic",
     ctx: Context = None,
 ) -> DetectTopicsOutput:
     """Detect which research topics a query relates to.
@@ -105,9 +113,13 @@ async def detect_topics(
     topic_info = app.topic_info_dict or {}
 
     if method == "keyword":
-        detected = extract_topics_from_query(query, topic_names)
+        detected = fallback_keyword_match(query, topic_info)
     else:
         detected = _detect_topic_ids(app, query)
+
+    score_map = {}
+    if method == "dynamic" and app.topic_assigner is not None:
+        score_map = dict(app.topic_assigner.rank_query_topics(query, top_k=2))
 
     detected_topics = []
     for tid in detected:
@@ -115,7 +127,7 @@ async def detect_topics(
             TopicInfo(
                 topic_id=tid,
                 name=topic_names.get(tid, f"Topic {tid}"),
-                relevance_score=1.0,
+                relevance_score=float(score_map.get(tid, 0.0)),
             )
         )
 
@@ -128,8 +140,8 @@ async def detect_topics(
 
 @mcp.tool()
 async def analyze_community(
-    query: str,
-    topic_ids: Optional[List[int]] = None,
+    query: Annotated[str, Field(min_length=1, max_length=2000)],
+    topic_ids: Optional[List[Annotated[int, Field(ge=0)]]] = None,
     ctx: Context = None,
 ) -> AnalyzeCommunityOutput:
     """Analyze the research community around detected topics.
@@ -153,6 +165,10 @@ async def analyze_community(
 
     if topic_ids is None:
         topic_ids = _detect_topic_ids(app, query)
+
+    invalid_topic_ids = sorted(set(topic_ids or []) - set(app.topic_info_dict or {}))
+    if invalid_topic_ids:
+        raise ValueError(f"Unknown topic IDs: {invalid_topic_ids}")
 
     if not topic_ids:
         return AnalyzeCommunityOutput(
@@ -192,7 +208,7 @@ async def analyze_community(
     updated_embeddings = {
         "paper": x_dict.get("paper"),
         "author": x_dict.get("author", x_dict.get("researcher")),
-        "paper_quality": x_dict.get("paper"),
+        "paper_quality": x_dict.get("paper_quality"),
     }
 
     if app.importance_logits is None:
@@ -422,8 +438,8 @@ async def analyze_community(
 
 @mcp.tool()
 async def generate_strategy(
-    query: str,
-    topic_ids: Optional[List[int]] = None,
+    query: Annotated[str, Field(min_length=1, max_length=2000)],
+    topic_ids: Optional[List[Annotated[int, Field(ge=0)]]] = None,
     ctx: Context = None,
 ) -> GenerateStrategyOutput:
     """Generate a personalized research strategy from community analysis.

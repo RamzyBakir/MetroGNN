@@ -15,7 +15,10 @@ class AdvancedHeteroGCN(nn.Module):
     ):
         super().__init__()
 
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
         self.num_layers = num_layers
+        self.num_classes = num_classes
         self.num_topics = num_topics
         self.convs = nn.ModuleList()
 
@@ -37,6 +40,12 @@ class AdvancedHeteroGCN(nn.Module):
                     ("author", "collaborates_with", "author"): SAGEConv(
                         (-1, -1), hidden_channels
                     ),
+                    ("paper", "cites", "paper"): SAGEConv(
+                        (-1, -1), hidden_channels
+                    ),
+                    ("paper", "cited_by", "paper"): SAGEConv(
+                        (-1, -1), hidden_channels
+                    ),
                 },
                 aggr="mean",
             )
@@ -49,6 +58,15 @@ class AdvancedHeteroGCN(nn.Module):
         self.paper_quality = nn.Sequential(nn.Linear(hidden_channels, 1), nn.Sigmoid())
 
         self.attention_weights = nn.Parameter(torch.randn(3))  # author, paper, topic
+
+    def get_config(self):
+        return {
+            "hidden_channels": self.hidden_channels,
+            "out_channels": self.out_channels,
+            "num_layers": self.num_layers,
+            "num_classes": self.num_classes,
+            "num_topics": self.num_topics,
+        }
 
     def forward(self, x_dict, edge_index_dict):
 
@@ -106,7 +124,7 @@ class AdvancedHeteroGCN(nn.Module):
             role_logits = self.role_head(author_features)
             influence_scores = self.influence_head(author_features)
             return x_dict, importance_logits, role_logits, influence_scores
-        return x_dict, None, None
+        return x_dict, None, None, None
 
     def aggregate_paper_context(self, author_emb, paper_emb, edge_index_dict):
         authored_edges = edge_index_dict[("author", "authored", "paper")]

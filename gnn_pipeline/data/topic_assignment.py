@@ -8,8 +8,10 @@ clusters.
 
 import ast
 import json
+import os
 import re
 from collections import Counter
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -31,6 +33,47 @@ class TopicAssigner:
         self._embed_model: Optional[SentenceTransformer] = None
         self.kmeans: Optional[KMeans] = None
         self.cluster_centers_: Optional[np.ndarray] = None
+
+    def save_centroids(self, path: str, dataset_sha256: str = "") -> None:
+        """Persist query-time topic centroids without pickling executable objects."""
+        if self.cluster_centers_ is None:
+            raise RuntimeError("TopicAssigner has no fitted cluster centers")
+        output = Path(path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            output,
+            cluster_centers=self.cluster_centers_,
+            n_clusters=np.array([self.n_clusters], dtype=np.int64),
+            model_name=np.array([self.model_name]),
+            dataset_sha256=np.array([dataset_sha256]),
+        )
+
+    @classmethod
+    def from_centroids(cls, path: str) -> "TopicAssigner":
+        """Load a query-time assigner from a safe NumPy archive."""
+        with np.load(path, allow_pickle=False) as payload:
+            model_name = str(payload["model_name"][0])
+            n_clusters = int(payload["n_clusters"][0])
+            centers = payload["cluster_centers"].astype(np.float32)
+        assigner = cls(n_clusters=n_clusters, model_name=model_name)
+        assigner.cluster_centers_ = centers
+        return assigner
+
+    def rank_query_topics(self, query: str, top_k: int = 2) -> List[Tuple[int, float]]:
+        """Rank fitted topics for a query using embedding cosine similarity."""
+        if self.cluster_centers_ is None:
+            raise RuntimeError("Topic centroids are not loaded")
+        text = str(query).strip()
+        if not text:
+            return []
+        query_embedding = np.asarray(self.embed_model.encode([text]))[0]
+        centers = np.asarray(self.cluster_centers_)
+        query_norm = np.linalg.norm(query_embedding)
+        center_norms = np.linalg.norm(centers, axis=1)
+        denominators = np.maximum(query_norm * center_norms, 1e-12)
+        scores = centers.dot(query_embedding) / denominators
+        indices = np.argsort(scores)[::-1][: max(1, min(top_k, len(scores)))]
+        return [(int(idx), float(scores[idx])) for idx in indices]
 
     @property
     def embed_model(self) -> SentenceTransformer:
@@ -230,6 +273,143 @@ class TopicAssigner:
 # ── convenience function ────────────────────────────────────────────────
 
 
+def save_topic_artifacts(
+    df: pd.DataFrame,
+    topic_info: Dict[int, Dict],
+    assigner: TopicAssigner,
+    *,
+    assignments_path: str,
+    topic_info_path: str,
+    centroids_path: str,
+    dataset_sha256: str = "",
+) -> None:
+    """Persist stable per-paper assignments, topic metadata, and centroids."""
+    if "topic_id" not in df.columns:
+        raise ValueError("DataFrame has no topic_id column")
+    if "id" not in df.columns or df["id"].isna().any() or not df["id"].is_unique:
+        raise ValueError("Stable, unique paper IDs are required for topic persistence")
+
+    assignments = pd.DataFrame(
+        {
+            "paper_id": df["id"].astype(str).to_numpy(),
+            "row_index": np.arange(len(df), dtype=np.int64),
+            "topic_id": df["topic_id"].astype(int).to_numpy(),
+            "topic_name": df.get(
+                "topic_name", pd.Series([""] * len(df), index=df.index)
+            ).astype(str).to_numpy(),
+        }
+    )
+    output = Path(assignments_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    assignments.to_csv(output, index=False)
+
+    info_output = Path(topic_info_path)
+    info_output.parent.mkdir(parents=True, exist_ok=True)
+    info_output.write_text(
+        json.dumps({str(k): v for k, v in topic_info.items()}, indent=2, ensure_ascii=False)
+    )
+    assigner.save_centroids(centroids_path, dataset_sha256=dataset_sha256)
+
+
+def load_topic_artifacts(
+    df: pd.DataFrame,
+    *,
+    assignments_path: str,
+    topic_info_path: str,
+    centroids_path: str,
+    expected_n_clusters: Optional[int] = None,
+) -> Tuple[pd.DataFrame, Dict[int, Dict], TopicAssigner]:
+    """Load and strictly validate persisted topic artifacts."""
+    for path in (assignments_path, topic_info_path, centroids_path):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Required topic artifact not found: {path}")
+
+    assignments = pd.read_csv(assignments_path, dtype={"paper_id": str})
+    required = {"paper_id", "row_index", "topic_id"}
+    if not required.issubset(assignments.columns):
+        raise ValueError(f"Topic assignments are missing columns: {required - set(assignments.columns)}")
+    if len(assignments) != len(df):
+        raise ValueError("Topic assignments have a different paper count than the CSV")
+    expected_ids = df["id"].astype(str).tolist()
+    if assignments["paper_id"].tolist() != expected_ids:
+        raise ValueError("Topic assignments do not match the ordered CSV paper IDs")
+
+    raw_info = json.loads(Path(topic_info_path).read_text())
+    topic_info = {int(k): v for k, v in raw_info.items()}
+    assigner = TopicAssigner.from_centroids(centroids_path)
+    if expected_n_clusters is not None and assigner.n_clusters != expected_n_clusters:
+        raise ValueError(
+            f"Cached topics use k={assigner.n_clusters}, expected k={expected_n_clusters}"
+        )
+    expected_topic_ids = set(range(assigner.n_clusters))
+    if set(topic_info) != expected_topic_ids:
+        raise ValueError("Topic metadata IDs do not match the persisted centroids")
+    assigned_topic_ids = set(assignments["topic_id"].astype(int).tolist())
+    if not assigned_topic_ids.issubset(expected_topic_ids):
+        raise ValueError("Topic assignments contain an out-of-range topic ID")
+
+    result = df.copy()
+    result["topic_id"] = assignments["topic_id"].astype(int).to_numpy()
+    names = {tid: info.get("name", f"Topic {tid}") for tid, info in topic_info.items()}
+    result["topic_name"] = result["topic_id"].map(names)
+    if result["topic_id"].nunique() < 2 and len(result) > 1:
+        raise ValueError("Cached topic assignments populate fewer than two topics")
+    return result, topic_info, assigner
+
+
+def prepare_topics(
+    df: pd.DataFrame,
+    *,
+    n_clusters: int,
+    assignments_path: str,
+    topic_info_path: str,
+    centroids_path: str,
+    dataset_sha256: str,
+    force_regenerate: bool = False,
+) -> Tuple[pd.DataFrame, Dict[int, Dict], TopicAssigner, bool]:
+    """Load compatible topic artifacts or explicitly generate a complete set."""
+    artifact_paths = (assignments_path, topic_info_path, centroids_path)
+    existing_artifacts = [os.path.isfile(path) for path in artifact_paths]
+    artifacts_exist = all(existing_artifacts)
+    if any(existing_artifacts) and not artifacts_exist and not force_regenerate:
+        missing = [
+            path for path, exists in zip(artifact_paths, existing_artifacts) if not exists
+        ]
+        raise ValueError(
+            f"Incomplete topic artifact set; missing {missing}. "
+            "Regenerate topics explicitly."
+        )
+    if artifacts_exist and not force_regenerate:
+        loaded_df, topic_info, assigner = load_topic_artifacts(
+            df,
+            assignments_path=assignments_path,
+            topic_info_path=topic_info_path,
+            centroids_path=centroids_path,
+            expected_n_clusters=n_clusters,
+        )
+        with np.load(centroids_path, allow_pickle=False) as payload:
+            cached_sha = str(payload["dataset_sha256"][0])
+        if cached_sha != dataset_sha256:
+            raise ValueError(
+                "Topic artifacts were generated from a different dataset. "
+                "Regenerate them explicitly."
+            )
+        return loaded_df, topic_info, assigner, False
+
+    assigner = TopicAssigner(n_clusters=n_clusters)
+    assigned_df, _, topic_info = assigner.assign_topics(df)
+    save_topic_artifacts(
+        assigned_df,
+        topic_info,
+        assigner,
+        assignments_path=assignments_path,
+        topic_info_path=topic_info_path,
+        centroids_path=centroids_path,
+        dataset_sha256=dataset_sha256,
+    )
+    return assigned_df, topic_info, assigner, True
+
+
 def assign_topics_to_dblp(
     df: pd.DataFrame, n_clusters: int = 8, auto_k: bool = False
 ) -> Tuple[pd.DataFrame, Dict, Dict]:
@@ -250,51 +430,37 @@ def assign_topics_to_dblp(
 if __name__ == "__main__":
     import argparse
 
-    from gnn_pipeline.config import get_path
+    from gnn_pipeline.artifacts import sha256_file
+    from gnn_pipeline.config import get_path, get_value
 
-    default_csv = get_path("data", "csv_path")
-
-    parser = argparse.ArgumentParser(description="Assign topics to DBLP papers")
-    parser.add_argument("--csv", default=default_csv, help="Input CSV")
-    parser.add_argument("--n-clusters", type=int, default=8, help="Number of topics")
+    parser = argparse.ArgumentParser(description="Generate versioned paper topic artifacts")
+    parser.add_argument("--csv", default=get_path("data", "csv_path"), help="Input CSV")
+    parser.add_argument(
+        "--n-clusters",
+        type=int,
+        default=get_value("training", "n_clusters"),
+        help="Number of topics",
+    )
     parser.add_argument("--auto-k", action="store_true", help="Auto-find best k")
-    parser.add_argument(
-        "--out-csv", default=None, help="Output CSV (default: overwrite input)"
-    )
-    parser.add_argument(
-        "--out-topic-info",
-        default=None,
-        help="Output topic info JSON (default: models/topic_info_new.json)",
-    )
+    parser.add_argument("--out-csv", default=None, help="Optional derived CSV; source is never overwritten")
     args = parser.parse_args()
 
-    if args.out_topic_info is None:
-        import os
-
-        args.out_topic_info = os.path.join(
-            os.path.dirname(get_path("models", "dir")), "topic_info_new.json"
-        )
-
-    try:
-        df = pd.read_csv(args.csv, on_bad_lines="skip")
-    except UnicodeDecodeError:
-        print(
-            f"File {args.csv} could not be read as UTF-8. Retrying with latin-1 encoding..."
-        )
-        df = pd.read_csv(args.csv, encoding="latin-1", on_bad_lines="skip")
-    df_new, results, topic_info = assign_topics_to_dblp(
-        df, n_clusters=args.n_clusters, auto_k=args.auto_k
+    df = pd.read_csv(args.csv)
+    assigner = TopicAssigner(n_clusters=args.n_clusters)
+    df_new, results, topic_info = assigner.assign_topics(df, auto_k=args.auto_k)
+    save_topic_artifacts(
+        df_new,
+        topic_info,
+        assigner,
+        assignments_path=get_path("data", "topic_assignments_path"),
+        topic_info_path=get_path("data", "topic_json_path"),
+        centroids_path=get_path("data", "topic_centroids_path"),
+        dataset_sha256=sha256_file(args.csv),
     )
+    if args.out_csv:
+        df_new.to_csv(args.out_csv, index=False)
+        print(f"Saved derived CSV to: {args.out_csv}")
 
-    out_csv = args.out_csv or args.csv
-    df_new.to_csv(out_csv, index=False)
-    print(f"\nSaved topics to: {out_csv}")
-
-    with open(args.out_topic_info, "w") as f:
-        json.dump({str(k): v for k, v in topic_info.items()}, f, indent=2)
-    print(f"Saved topic info to: {args.out_topic_info}")
-
-    print("\n── Topic Summary ──")
+    print("\nTopic Summary")
     for tid, info in sorted(topic_info.items()):
-        print(f"  Topic {tid}: {info['name']}  ({info['size']} papers)")
-        print(f"    Top terms: {', '.join(info['top_terms'][:5])}")
+        print(f"  Topic {tid}: {info['name']} ({info['size']} papers)")

@@ -128,6 +128,8 @@ class SubgraphExtractor:
             (("paper", "has_topic", "topic"), paper_id_map, topic_id_map),
             (("topic", "has_paper", "paper"), topic_id_map, paper_id_map),
             (("author", "collaborates_with", "author"), author_id_map, author_id_map),
+            (("paper", "cites", "paper"), paper_id_map, paper_id_map),
+            (("paper", "cited_by", "paper"), paper_id_map, paper_id_map),
         ]
 
         for edge_type, src_map, dst_map in edge_specs:

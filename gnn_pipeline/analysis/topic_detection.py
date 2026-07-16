@@ -16,11 +16,12 @@ def calculate_topic_relevance_score(
     relevance_scores = {}
 
     for tid in detected_topic_ids:
-        if str(tid) not in topic_info_dict:
+        info = topic_info_dict.get(tid, topic_info_dict.get(str(tid)))
+        if info is None:
             relevance_scores[int(tid)] = 0.0
             continue
 
-        top_terms = topic_info_dict[str(tid)].get("top_terms", [])
+        top_terms = info.get("top_terms", [])
         match_score = 0.0
 
         # Count exact and partial matches
@@ -143,64 +144,11 @@ def extract_topics_from_query(query, topic_names, include_recency=True):
 def extract_topics_from_query_dynamic(
     query: str, topic_assigner, topic_info_dict: dict
 ) -> list:
-    """
-    Match user query to dynamic topics using TF-IDF similarity + fuzzy matching.
-
-    Args:
-        query: User query string
-        topic_assigner: TopicAssigner instance with fitted vectorizer and cluster centers
-        topic_info_dict: Topic information dictionary
-
-    Returns:
-        List of relevant topic IDs (up to 2)
-    """
+    """Match a query to persisted MiniLM topic centroids."""
     try:
-        from sklearn.metrics.pairwise import cosine_similarity
-    except ImportError:
-        return list(topic_info_dict.keys())[:2]
-
-    # Preprocess query
-    query_clean = topic_assigner.preprocess_text(query)
-
-    if not query_clean or not query_clean.strip():
-        return list(topic_info_dict.keys())[:2]
-
-    # Get vectorizer and cluster centers
-    vectorizer = topic_assigner.get_vectorizer()
-    cluster_centers = topic_assigner.get_cluster_centers()
-
-    if vectorizer is None or cluster_centers is None:
-        return list(topic_info_dict.keys())[:2]
-
-    try:
-        # Vectorize query using fitted TF-IDF
-        query_vector = vectorizer.transform([query_clean]).toarray()[0]
-
-        # Compute cosine similarity to each cluster center
-        similarities = cosine_similarity([query_vector], cluster_centers)[0]
-
-        # Add fuzzy matching boost for keywords
-        keyword_boosts = np.zeros(len(similarities))
-        query_terms = query_clean.lower().split()
-
-        for topic_id, info in topic_info_dict.items():
-            top_terms = info.get("top_terms", [])
-            for term in query_terms:
-                for top_term in top_terms:
-                    # Simple fuzzy match (partial string matching)
-                    if term in top_term.lower() or top_term.lower() in term:
-                        keyword_boosts[int(topic_id)] += 0.1
-
-        # Combine scores
-        final_scores = similarities + keyword_boosts
-
-        # Get top 2 topics
-        top_indices = final_scores.argsort()[-2:][::-1]
-
-        return top_indices.tolist()
-    except Exception as e:
-        # Fallback: use simple keyword matching
-        return fallback_keyword_match(query_clean, topic_info_dict)[:2]
+        return [topic_id for topic_id, _ in topic_assigner.rank_query_topics(query, top_k=2)]
+    except (AttributeError, RuntimeError, ValueError):
+        return fallback_keyword_match(query, topic_info_dict)[:2]
 
 
 def fallback_keyword_match(

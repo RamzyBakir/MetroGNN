@@ -1,22 +1,24 @@
+import json
 import logging
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Annotated, Dict, List, Literal, Optional
 
 import torch
 from mcp.server.fastmcp import Context
+from pydantic import Field
 
+from gnn_pipeline.artifacts import validate_pipeline_manifest
 from gnn_pipeline.config import get_path
 from gnn_pipeline.data.vector_store import PaperVectorStore
-from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
+from gnn_pipeline.data.parsing import load_author_mapping
+from gnn_pipeline.models.checkpoint import load_model_for_pipeline
 
 from mcp_server.models.schemas import (
     AuthorProfile,
-    GetAuthorProfilesInput,
     GetAuthorProfilesOutput,
     InferenceSummary,
     PaperResult,
-    QueryPapersInput,
     QueryPapersOutput,
-    RunInferenceInput,
     RunInferenceOutput,
 )
 from mcp_server.server import _get_ctx, mcp
@@ -24,49 +26,62 @@ from mcp_server.server import _get_ctx, mcp
 logger = logging.getLogger("mcp_server.tools.inference")
 
 IMPORTANCE_LABELS = {0: "Low", 1: "Medium", 2: "High"}
-ROLE_LABELS = {0: "Hub", 1: "Active", 2: "Occasional", 3: "Isolated"}
+ROLE_LABELS = {0: "Leader", 1: "Core", 2: "Contributor", 3: "Sole Expert"}
 
 
 def _ensure_model_and_graph(app) -> None:
+    manifest_path = get_path("models", "pipeline_manifest")
+    graph_path = get_path("models", "knowledge_graph")
+    manifest = app.pipeline_manifest or validate_pipeline_manifest(
+        manifest_path,
+        csv_path=get_path("data", "csv_path"),
+        graph_path=graph_path,
+    )
+    app.pipeline_manifest = manifest
+
     if not app.is_model_ready():
-        model_path = get_path("models", "best_model_new")
-        cfg = {}
-        try:
-            from gnn_pipeline.config import get_value
-
-            cfg = {
-                "hidden_channels": get_value("training", "hidden_channels"),
-                "out_channels": get_value("training", "out_channels"),
-                "num_layers": get_value("training", "num_layers"),
-                "num_classes": get_value("training", "num_classes"),
-                "n_clusters": get_value("training", "n_clusters"),
-            }
-        except Exception:
-            cfg = {
-                "hidden_channels": 64,
-                "out_channels": 32,
-                "num_layers": 4,
-                "num_classes": 3,
-                "n_clusters": 8,
-            }
-
-        model = AdvancedHeteroGCN(
-            hidden_channels=cfg["hidden_channels"],
-            out_channels=cfg["out_channels"],
-            num_layers=cfg["num_layers"],
-            num_classes=cfg["num_classes"],
-            num_topics=cfg.get("n_clusters", 8),
+        app.model, _ = load_model_for_pipeline(
+            get_path("models", "best_model_new"), manifest_path, map_location="cpu"
         )
-        state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
-        model.load_state_dict(state_dict)
-        model.eval()
-        app.model = model
         app._model_loaded = True
 
     if not app.is_graph_ready():
-        graph_path = get_path("models", "knowledge_graph")
+        # HeteroData requires trusted-object deserialization; checksum validation
+        # above ensures this is the graph recorded by the local manifest.
         app.graph = torch.load(graph_path, map_location="cpu", weights_only=False)
+        if getattr(app.graph, "pipeline_schema_version", None) != 2:
+            raise RuntimeError("Knowledge graph is not a v2 graph")
         app._graph_loaded = True
+
+    if app.author_records is None:
+        app.author_records = load_author_mapping(get_path("models", "author_mapping"))
+    if app.topic_info_dict is None:
+        raw_topics = json.loads(Path(get_path("data", "topic_json_path")).read_text())
+        app.topic_info_dict = {int(key): value for key, value in raw_topics.items()}
+        app.topic_names = {
+            key: value.get("name", f"Topic {key}")
+            for key, value in app.topic_info_dict.items()
+        }
+
+
+def _ensure_vector_store(app) -> PaperVectorStore:
+    if app.vector_store is None:
+        app.vector_store = PaperVectorStore(
+            persist_dir=get_path("models", "vector_store"),
+            manifest_path=get_path("models", "vector_store_manifest"),
+        )
+    manifest = app.pipeline_manifest or validate_pipeline_manifest(
+        get_path("models", "pipeline_manifest"),
+        csv_path=get_path("data", "csv_path"),
+        verify_large_files=False,
+    )
+    app.pipeline_manifest = manifest
+    app.vector_store.validate_compatibility(
+        csv_path=get_path("data", "csv_path"),
+        topic_assignments_path=get_path("data", "topic_assignments_path"),
+        pipeline_id=manifest["pipeline_id"],
+    )
+    return app.vector_store
 
 
 def _run_gnn_inference(app) -> Dict[int, Dict]:
@@ -96,8 +111,12 @@ def _run_gnn_inference(app) -> Dict[int, Dict]:
     app.influence_scores = inf_scores
 
     for i in range(num_authors):
+        identity = (app.author_records or {}).get(i, {})
         app.author_predictions[i] = {
             "author_id": i,
+            "author_key": identity.get("author_key", ""),
+            "name": identity.get("name", ""),
+            "organization": identity.get("organization", ""),
             "importance_class": int(imp_cls[i]),
             "importance_label": IMPORTANCE_LABELS.get(int(imp_cls[i]), "Unknown"),
             "role_class": int(role_cls[i]),
@@ -107,7 +126,6 @@ def _run_gnn_inference(app) -> Dict[int, Dict]:
             "collaboration_count": int(author_features[i, 1].item()),
             "topic_diversity": float(author_features[i, 2].item()),
             "years_active": float(author_features[i, 3].item()),
-            "citation_impact": float(author_features[i, 4].item()),
         }
 
     return app.author_predictions
@@ -118,6 +136,8 @@ def _make_author_profile(d: Dict) -> AuthorProfile:
 
 
 def _get_paper_author_edges(app) -> Dict[int, List[int]]:
+    if app.paper_author_edges is not None:
+        return app.paper_author_edges
     graph = app.graph
     if ("author", "authored", "paper") in graph.edge_types:
         ei = graph["author", "authored", "paper"].edge_index
@@ -126,21 +146,27 @@ def _get_paper_author_edges(app) -> Dict[int, List[int]]:
     mapping: Dict[int, List[int]] = {}
     for i in range(ei.shape[1]):
         mapping.setdefault(int(ei[1, i].item()), []).append(int(ei[0, i].item()))
+    app.paper_author_edges = mapping
     return mapping
 
 
 def _get_paper_topic_edges(app) -> Dict[int, int]:
+    if app.paper_topic_edges is not None:
+        return app.paper_topic_edges
     graph = app.graph
     if ("paper", "has_topic", "topic") not in graph.edge_types:
         return {}
     ei = graph["paper", "has_topic", "topic"].edge_index
-    return {int(ei[0, i].item()): int(ei[1, i].item()) for i in range(ei.shape[1])}
+    app.paper_topic_edges = {
+        int(ei[0, i].item()): int(ei[1, i].item()) for i in range(ei.shape[1])
+    }
+    return app.paper_topic_edges
 
 
 @mcp.tool()
 async def query_papers(
-    query: str,
-    top_k: int = 50,
+    query: Annotated[str, Field(min_length=1, max_length=2000)],
+    top_k: Annotated[int, Field(ge=1, le=500)] = 50,
     interests: Optional[List[str]] = None,
     ctx: Context = None,
 ) -> QueryPapersOutput:
@@ -156,8 +182,7 @@ async def query_papers(
         interests: Optional extra keywords appended to the query for boosting.
     """
     app = _get_ctx(ctx)
-    store = PaperVectorStore(persist_dir=get_path("models", "vector_store"))
-
+    store = _ensure_vector_store(app)
     result = store.query(query_text=query, top_k=top_k, interests=interests)
 
     papers = []
@@ -184,10 +209,10 @@ async def query_papers(
 @mcp.tool()
 async def get_author_profiles(
     author_ids: Optional[List[int]] = None,
-    importance_filter: Optional[str] = None,
-    role_filter: Optional[str] = None,
+    importance_filter: Optional[Literal["Low", "Medium", "High"]] = None,
+    role_filter: Optional[Literal["Leader", "Core", "Contributor", "Sole Expert"]] = None,
     min_influence: Optional[float] = None,
-    limit: int = 50,
+    limit: Annotated[int, Field(ge=1, le=500)] = 50,
     ctx: Context = None,
 ) -> GetAuthorProfilesOutput:
     """Retrieve GNN-predicted author profiles from the knowledge graph.
@@ -199,7 +224,7 @@ async def get_author_profiles(
     Args:
         author_ids: Specific author IDs to look up. Omit for all authors.
         importance_filter: Filter by importance label (Low, Medium, High).
-        role_filter: Filter by role label (Hub, Active, Occasional, Isolated).
+        role_filter: Filter by role label (Leader, Core, Contributor, Sole Expert).
         min_influence: Minimum influence score threshold.
         limit: Maximum number of authors to return (1-500).
     """
@@ -232,13 +257,13 @@ async def get_author_profiles(
 
 @mcp.tool()
 async def run_inference(
-    query: str,
-    experience_level: str = "intermediate",
+    query: Annotated[str, Field(min_length=1, max_length=2000)],
+    experience_level: Literal["beginner", "intermediate", "advanced"] = "intermediate",
     interests: Optional[List[str]] = None,
-    goals: str = "research",
-    top_papers: int = 20,
-    retrieval_k: int = 100,
-    sort_by: str = "influence",
+    goals: Literal["learn", "research", "career"] = "research",
+    top_papers: Annotated[int, Field(ge=1, le=100)] = 20,
+    retrieval_k: Annotated[int, Field(ge=1, le=500)] = 100,
+    sort_by: Literal["influence", "citations", "year"] = "influence",
     ctx: Context = None,
 ) -> RunInferenceOutput:
     """Run the full inference pipeline: semantic retrieval + GNN scoring.
@@ -262,7 +287,7 @@ async def run_inference(
     app = _get_ctx(ctx)
     _ensure_model_and_graph(app)
 
-    store = PaperVectorStore(persist_dir=get_path("models", "vector_store"))
+    store = _ensure_vector_store(app)
     retrieval = store.query(query_text=query, top_k=retrieval_k, interests=interests)
     retrieved_ids = retrieval["paper_ids"]
     distances = retrieval["distances"]
@@ -328,7 +353,9 @@ async def run_inference(
                 else 0,
                 venue=str(row.get("venue", "")),
                 topic_id=int(topic_id) if topic_id >= 0 else None,
-                topic_name=f"Topic {int(topic_id)}" if topic_id >= 0 else "",
+                topic_name=(app.topic_names or {}).get(int(topic_id), f"Topic {int(topic_id)}")
+                if topic_id >= 0
+                else "",
                 authors=[_make_author_profile(a) for a in authors_data],
                 aggregated_influence=agg_influence,
                 semantic_similarity=semantic_sim,

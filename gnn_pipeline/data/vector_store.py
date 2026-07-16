@@ -12,18 +12,24 @@ Usage:
 
 import os
 import ast
-import json
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import chromadb
-import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
+
+from gnn_pipeline.artifacts import (
+    ArtifactCompatibilityError,
+    VECTOR_STORE_SCHEMA_VERSION,
+    sha256_file,
+    write_json_atomic,
+)
 
 
 COLLECTION_NAME = "dblp_papers"
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-DEFAULT_PERSIST_DIR = "models/vector_store_semantic"
+DEFAULT_PERSIST_DIR = "models/vector_store_semantic_v2"
 
 
 class PaperVectorStore:
@@ -33,14 +39,19 @@ class PaperVectorStore:
         self,
         persist_dir: str = DEFAULT_PERSIST_DIR,
         model_name: str = EMBED_MODEL_NAME,
+        manifest_path: Optional[str] = None,
     ):
         self.persist_dir = persist_dir
         self.model_name = model_name
+        self.manifest_path = manifest_path or os.path.join(
+            persist_dir, "vector_store_manifest.json"
+        )
 
         # Lazy-loaded
         self._client: Optional[chromadb.PersistentClient] = None
         self._collection: Optional[chromadb.Collection] = None
         self._embed_model: Optional[SentenceTransformer] = None
+        self._validated_signature = None
 
     # ------------------------------------------------------------------
     # Properties (lazy init)
@@ -101,6 +112,8 @@ class PaperVectorStore:
         csv_path: str = "data/dblp_with_topics_new.csv",
         batch_size: int = 256,
         force_reingest: bool = False,
+        topic_assignments_path: Optional[str] = None,
+        pipeline_id: Optional[str] = None,
     ) -> int:
         """
         Embed every paper and upsert into ChromaDB.
@@ -108,6 +121,12 @@ class PaperVectorStore:
         Returns the number of papers ingested.
         """
         if not force_reingest and self.collection.count() > 0:
+            if topic_assignments_path:
+                self.validate_compatibility(
+                    csv_path=csv_path,
+                    topic_assignments_path=topic_assignments_path,
+                    pipeline_id=pipeline_id,
+                )
             print(
                 f"Collection already has {self.collection.count()} papers. "
                 "Use force_reingest=True to re-ingest."
@@ -120,6 +139,17 @@ class PaperVectorStore:
             self._collection = None  # force re-creation via property
 
         df = pd.read_csv(csv_path)
+        if topic_assignments_path:
+            assignments = pd.read_csv(topic_assignments_path, dtype={"paper_id": str})
+            if len(assignments) != len(df) or assignments["paper_id"].tolist() != df["id"].astype(str).tolist():
+                raise ArtifactCompatibilityError(
+                    "Topic assignments do not match the vector-store CSV"
+                )
+            df["topic_id"] = assignments["topic_id"].astype(int).to_numpy()
+        elif "topic_id" not in df.columns:
+            raise ArtifactCompatibilityError(
+                "Versioned topic assignments are required for vector ingestion"
+            )
         print(f"Ingesting {len(df)} papers from {csv_path} ...")
 
         documents: List[str] = []
@@ -169,10 +199,70 @@ class PaperVectorStore:
             total_upserted += end - start
             print(f"  Upserted {total_upserted}/{len(ids)} papers")
 
-        print(
-            f"Ingestion complete. Collection now has {self.collection.count()} papers."
+        final_count = self.collection.count()
+        manifest = {
+            "vector_store_schema_version": VECTOR_STORE_SCHEMA_VERSION,
+            "pipeline_id": pipeline_id,
+            "dataset_sha256": sha256_file(csv_path),
+            "topic_assignments_sha256": sha256_file(topic_assignments_path)
+            if topic_assignments_path
+            else None,
+            "embedding_model": self.model_name,
+            "collection_name": COLLECTION_NAME,
+            "paper_count": final_count,
+        }
+        write_json_atomic(self.manifest_path, manifest)
+        print(f"Ingestion complete. Collection now has {final_count} papers.")
+        return final_count
+
+    def validate_compatibility(
+        self,
+        *,
+        csv_path: str,
+        topic_assignments_path: str,
+        pipeline_id: Optional[str] = None,
+    ) -> Dict:
+        """Reject a stale vector index before serving recommendations."""
+        if not os.path.isfile(self.manifest_path):
+            raise ArtifactCompatibilityError(
+                f"Vector-store manifest not found: {self.manifest_path}"
+            )
+        signature = (
+            os.path.getmtime(self.manifest_path),
+            os.path.getmtime(csv_path),
+            os.path.getsize(csv_path),
+            os.path.getmtime(topic_assignments_path),
+            os.path.getsize(topic_assignments_path),
+            pipeline_id,
+            self.collection.count(),
         )
-        return self.collection.count()
+        if self._validated_signature == signature:
+            import json
+
+            return json.loads(Path(self.manifest_path).read_text())
+
+        import json
+
+        manifest = json.loads(Path(self.manifest_path).read_text())
+        if manifest.get("vector_store_schema_version") != VECTOR_STORE_SCHEMA_VERSION:
+            raise ArtifactCompatibilityError("Unsupported vector-store schema")
+        checks = {
+            "dataset_sha256": sha256_file(csv_path),
+            "topic_assignments_sha256": sha256_file(topic_assignments_path),
+            "embedding_model": self.model_name,
+            "paper_count": self.collection.count(),
+        }
+        for key, actual in checks.items():
+            if manifest.get(key) != actual:
+                raise ArtifactCompatibilityError(
+                    f"Vector store is incompatible: {key} does not match"
+                )
+        if pipeline_id and manifest.get("pipeline_id") != pipeline_id:
+            raise ArtifactCompatibilityError(
+                "Vector store and GNN graph belong to different pipelines"
+            )
+        self._validated_signature = signature
+        return manifest
 
     # ------------------------------------------------------------------
     # Querying
@@ -234,12 +324,15 @@ class PaperVectorStore:
 if __name__ == "__main__":
     import argparse
 
+    from gnn_pipeline.artifacts import validate_pipeline_manifest
+    from gnn_pipeline.config import get_path
+
     parser = argparse.ArgumentParser(description="Paper Vector Store CLI")
     sub = parser.add_subparsers(dest="command")
 
     ingest_parser = sub.add_parser("ingest", help="Ingest papers into the vector store")
     ingest_parser.add_argument(
-        "--csv", default="data/dblp_with_topics_new.csv", help="Path to papers CSV"
+        "--csv", default=get_path("data", "csv_path"), help="Path to papers CSV"
     )
     ingest_parser.add_argument(
         "--force", action="store_true", help="Force re-ingestion"
@@ -251,12 +344,29 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    store = PaperVectorStore()
+    pipeline_manifest = validate_pipeline_manifest(
+        get_path("models", "pipeline_manifest"),
+        csv_path=get_path("data", "csv_path"),
+    )
+    store = PaperVectorStore(
+        persist_dir=get_path("models", "vector_store"),
+        manifest_path=get_path("models", "vector_store_manifest"),
+    )
 
     if args.command == "ingest":
-        store.ingest_papers(csv_path=args.csv, force_reingest=args.force)
+        store.ingest_papers(
+            csv_path=args.csv,
+            force_reingest=args.force,
+            topic_assignments_path=get_path("data", "topic_assignments_path"),
+            pipeline_id=pipeline_manifest["pipeline_id"],
+        )
 
     elif args.command == "query":
+        store.validate_compatibility(
+            csv_path=get_path("data", "csv_path"),
+            topic_assignments_path=get_path("data", "topic_assignments_path"),
+            pipeline_id=pipeline_manifest["pipeline_id"],
+        )
         results = store.query(args.query_text, top_k=args.top_k)
         print(f"\nTop {len(results['paper_ids'])} results for: '{args.query_text}'\n")
         for i, (pid, dist, meta) in enumerate(

@@ -1,8 +1,9 @@
-import json
 from typing import Dict, List, Tuple
 
-import numpy as np
 import pandas as pd
+
+from gnn_pipeline.data.parsing import build_author_index, parse_authors as parse_author_records
+from gnn_pipeline.data.validation import validate_papers_dataframe
 
 
 def load_and_clean_dblp_data(
@@ -16,47 +17,34 @@ def load_and_clean_dblp_data(
 
     Returns:
         df: Cleaned DataFrame with papers
-        author_to_idx: Mapping from author names to unique indices
-        author_list: List of author names in index order
+        author_to_idx: Mapping from stable author keys to unique indices
+        author_list: Stable author keys in graph index order
     """
     df = pd.read_csv(csv_path)
+    validate_papers_dataframe(df)
 
     print(f"Original dataset: {len(df)} papers")
 
-    # Filter out papers with NaN venues
-    df = df.dropna(subset=["venue"])
-    print(f"After removing papers with NaN venues: {len(df)} papers")
+    # Keep row order immutable: graph node IDs and vector-store IDs share it.
+    print(f"Papers with missing venues: {int(df['venue'].isna().sum())}")
 
-    # Parse authors column (stored as stringified lists)
-    df["authors_parsed"] = df["authors"].apply(parse_authors)
-
-    # Filter out papers with empty or invalid author lists
-    df = df[df["authors_parsed"].apply(lambda x: len(x) > 0)]
-    print(f"After removing papers with invalid authors: {len(df)} papers")
-
-    # Extract all unique authors
-    all_authors = []
-    for author_list in df["authors_parsed"]:
-        all_authors.extend(author_list)
-
-    unique_authors = list(sorted(set(all_authors)))
-    print(f"Found {len(unique_authors)} unique authors")
-
-    # Create author to index mapping
-    author_to_idx = {author: idx for idx, author in enumerate(unique_authors)}
-    author_list = unique_authors
-
-    # Add author indices to dataframe
-    df["author_indices"] = df["authors_parsed"].apply(
-        lambda authors: [author_to_idx[a] for a in authors]
+    # Resolve stable identities before filtering so paper IDs remain aligned with
+    # graph and vector-store node IDs.
+    author_to_idx, author_records, paper_author_indices, identity_stats = (
+        build_author_index(df)
     )
+    df["authors_parsed"] = df["authors"].apply(parse_authors)
+    df["author_indices"] = paper_author_indices
+    print(f"Found {len(author_records)} stable authors")
+    print(f"Author identity statistics: {identity_stats}")
 
+    author_list = [record["author_key"] for record in author_records]
     return df, author_to_idx, author_list
 
 
 def parse_authors(authors_str: str) -> List[str]:
     """
-    Parse authors column which is stored as a stringified list.
+    Parse authors into stable identity keys without executing input.
 
     Args:
         authors_str: String representation of author list
@@ -64,21 +52,7 @@ def parse_authors(authors_str: str) -> List[str]:
     Returns:
         List of author names
     """
-    try:
-        # Try to parse as JSON
-        authors = json.loads(authors_str.replace("'", '"'))
-        if isinstance(authors, list):
-            return [str(a).strip() for a in authors]
-        return []
-    except:
-        # Fallback: try to extract using eval (less safe but handles Python syntax)
-        try:
-            authors = eval(authors_str)
-            if isinstance(authors, list):
-                return [str(a).strip() for a in authors]
-            return []
-        except:
-            return []
+    return [record["author_key"] for record in parse_author_records(authors_str)]
 
 
 def get_dataset_statistics(df: pd.DataFrame, author_to_idx: Dict[str, int]) -> Dict:

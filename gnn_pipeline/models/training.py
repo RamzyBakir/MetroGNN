@@ -5,6 +5,8 @@ from sklearn.metrics import accuracy_score
 import pandas as pd
 import os
 
+from gnn_pipeline.models.checkpoint import load_checkpoint_payload, save_model_checkpoint
+
 
 try:
     from gnn_pipeline.config import get_path
@@ -168,12 +170,17 @@ def create_enhanced_training_targets(data):
     return importance_targets, role_targets, influence_targets
 
 
-def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
+def train_enhanced_model(
+    model, data, epochs=200, checkpoint_path=None, pipeline_id=None
+):
     """
     Train MetroGNN model with multi-task learning using EXTERNAL ground truth.
 
     IMPORTANT: Call set_external_data(df, author_to_idx) BEFORE this function.
     """
+    if not pipeline_id:
+        raise ValueError("A v2 pipeline_id is required for versioned model checkpoints")
+
     if checkpoint_path is None and HAS_CONFIG:
         checkpoint_path = get_path("models", "best_model")
     elif checkpoint_path is None:
@@ -315,7 +322,12 @@ def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
             if val_total_loss < best_val_loss:
                 best_val_loss = val_total_loss
                 patience_counter = 0
-                torch.save(model.state_dict(), checkpoint_path)
+                save_model_checkpoint(
+                    model,
+                    checkpoint_path,
+                    pipeline_id=pipeline_id,
+                    extra={"epoch": epoch, "validation_loss": float(val_total_loss)},
+                )
             else:
                 patience_counter += 1
 
@@ -342,10 +354,13 @@ def train_enhanced_model(model, data, epochs=200, checkpoint_path=None):
 
     # Load best model
     try:
-        model.load_state_dict(torch.load(checkpoint_path))
+        payload = load_checkpoint_payload(checkpoint_path)
+        if payload.get("pipeline_id") != pipeline_id:
+            raise RuntimeError("Checkpoint pipeline ID mismatch")
+        model.load_state_dict(payload["state_dict"])
         print("Loaded best model from training")
-    except:
-        print("Could not load best model, using final model")
+    except (OSError, RuntimeError, ValueError, KeyError) as exc:
+        print(f"Could not load best model, using final model: {exc}")
 
     # Final evaluation
     model.eval()

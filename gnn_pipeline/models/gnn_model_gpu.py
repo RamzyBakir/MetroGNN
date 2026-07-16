@@ -22,7 +22,10 @@ class AdvancedHeteroGCN_GPU(nn.Module):
         super().__init__()
 
         self.device = device or torch.device("cpu")
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
         self.num_layers = num_layers
+        self.num_classes = num_classes
         self.num_topics = num_topics
         self.convs = nn.ModuleList()
 
@@ -44,6 +47,12 @@ class AdvancedHeteroGCN_GPU(nn.Module):
                     ("author", "collaborates_with", "author"): SAGEConv(
                         (-1, -1), hidden_channels
                     ),
+                    ("paper", "cites", "paper"): SAGEConv(
+                        (-1, -1), hidden_channels
+                    ),
+                    ("paper", "cited_by", "paper"): SAGEConv(
+                        (-1, -1), hidden_channels
+                    ),
                 },
                 aggr="mean",
             )
@@ -56,6 +65,15 @@ class AdvancedHeteroGCN_GPU(nn.Module):
         self.paper_quality = nn.Sequential(nn.Linear(hidden_channels, 1), nn.Sigmoid())
 
         self.attention_weights = nn.Parameter(torch.randn(3, device=self.device))
+
+    def get_config(self):
+        return {
+            "hidden_channels": self.hidden_channels,
+            "out_channels": self.out_channels,
+            "num_layers": self.num_layers,
+            "num_classes": self.num_classes,
+            "num_topics": self.num_topics,
+        }
 
     def forward(self, x_dict, edge_index_dict):
         """Forward pass with GPU-optimized operations"""

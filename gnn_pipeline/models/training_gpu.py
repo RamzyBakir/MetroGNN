@@ -10,11 +10,8 @@ from torch_geometric.utils import scatter
 
 from gnn_pipeline.config import get_path
 from gnn_pipeline.utils.visualization import plot_training_history
-from gnn_pipeline.models.training import (
-    set_external_data,
-    _external_df,
-    _external_author_to_idx,
-)
+from gnn_pipeline.models.training import set_external_data
+from gnn_pipeline.models.checkpoint import load_checkpoint_payload, save_model_checkpoint
 
 
 def create_enhanced_training_targets(data):
@@ -32,6 +29,7 @@ def train_enhanced_model_gpu(
     num_neighbors=15,
     use_amp=True,
     checkpoint_path=None,
+    pipeline_id=None,
 ):
     """
     GPU-optimized training with mixed precision and mini-batch support.
@@ -51,8 +49,12 @@ def train_enhanced_model_gpu(
 
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    if not pipeline_id:
+        raise ValueError("A v2 pipeline_id is required for versioned model checkpoints")
     if checkpoint_path is None:
         checkpoint_path = get_path("models", "best_model_gpu")
+
+    model = model.to(device)
 
     print("Starting GPU-optimized training with mixed precision")
     print(f"Device: {device}")
@@ -121,6 +123,10 @@ def train_enhanced_model_gpu(
         shuffle=False,
         num_workers=0,
     )
+
+    importance_targets = importance_targets.to(device)
+    role_targets = role_targets.to(device)
+    influence_targets = influence_targets.to(device)
 
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp and device.type == "cuda")
 
@@ -274,7 +280,12 @@ def train_enhanced_model_gpu(
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), checkpoint_path)
+            save_model_checkpoint(
+                model,
+                checkpoint_path,
+                pipeline_id=pipeline_id,
+                extra={"epoch": epoch, "validation_loss": float(avg_val_loss)},
+            )
         else:
             patience_counter += 1
 
@@ -300,10 +311,13 @@ def train_enhanced_model_gpu(
             break
 
     try:
-        model.load_state_dict(torch.load(checkpoint_path))
+        payload = load_checkpoint_payload(checkpoint_path, map_location=device)
+        if payload.get("pipeline_id") != pipeline_id:
+            raise RuntimeError("Checkpoint pipeline ID mismatch")
+        model.load_state_dict(payload["state_dict"])
         print("Loaded best model from training")
-    except:
-        print("Could not load best model, using final model")
+    except (OSError, RuntimeError, ValueError, KeyError) as exc:
+        print(f"Could not load best model, using final model: {exc}")
 
     data_full = data.to(device)
     model.eval()

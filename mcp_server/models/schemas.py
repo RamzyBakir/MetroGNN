@@ -8,12 +8,15 @@ from pydantic import BaseModel, Field
 
 class AuthorProfile(BaseModel):
     author_id: int = Field(description="Author node ID in the knowledge graph")
+    author_key: str = Field(default="", description="Stable DBLP/fallback author key")
+    name: str = Field(default="", description="Author display name")
+    organization: str = Field(default="", description="Most frequent organization metadata")
     importance_class: int = Field(
         description="Importance class index (0=Low, 1=Medium, 2=High)"
     )
     importance_label: str = Field(description="Human-readable importance label")
     role_class: int = Field(
-        description="Role class index (0=Hub, 1=Active, 2=Occasional, 3=Isolated)"
+        description="Role class index (0=Leader, 1=Core, 2=Contributor, 3=Sole Expert)"
     )
     role_label: str = Field(description="Human-readable role label")
     influence: float = Field(description="GNN-predicted influence score")
@@ -25,7 +28,6 @@ class AuthorProfile(BaseModel):
     years_active: float = Field(
         description="Number of years the author has been active"
     )
-    citation_impact: float = Field(description="Aggregate citation impact")
 
 
 class PaperResult(BaseModel):
@@ -46,7 +48,7 @@ class PaperResult(BaseModel):
         default=0.0, description="Cosine similarity to query"
     )
     relevance_score: float = Field(
-        default=0.0, description="Combined 0.6*semantic + 0.4*influence"
+        default=0.0, description="Weighted semantic-similarity and influence score"
     )
     num_authors: int = Field(default=0, description="Number of authors")
 
@@ -64,6 +66,9 @@ class TrainPipelineInput(BaseModel):
     )
     force_retrain: bool = Field(
         default=False, description="Retrain even if model already exists"
+    )
+    force_topics: bool = Field(
+        default=False, description="Explicitly regenerate topic assignments"
     )
 
 
@@ -158,11 +163,11 @@ class GetAuthorProfilesInput(BaseModel):
     importance_filter: Optional[Literal["Low", "Medium", "High"]] = Field(
         default=None, description="Filter by importance label"
     )
-    role_filter: Optional[Literal["Hub", "Active", "Occasional", "Isolated"]] = Field(
+    role_filter: Optional[Literal["Leader", "Core", "Contributor", "Sole Expert"]] = Field(
         default=None, description="Filter by role label"
     )
     min_influence: Optional[float] = Field(
-        default=None, ge=-1.0, le=1.0, description="Minimum influence"
+        default=None, description="Minimum predicted influence (currently unbounded)"
     )
     limit: int = Field(default=50, ge=1, le=500, description="Max authors to return")
 

@@ -1,151 +1,138 @@
-"""
-Rebuild the Knowledge Graph and Retrain the GNN with the newly assigned topics.
+"""Build the versioned MetroGNN recommendation graph and train its GNN."""
 
-This orchestrates the entire pipeline:
-1. Load papers and topic info
-2. Re-extract authors and build mappings
-3. Create all node features (paper, author, topic)
-4. Build PyG HeteroData graph
-5. Train the AdvancedHeteroGCN model
-"""
-
-import json
-import os
+import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
-import torch
 
-from gnn_pipeline.config import ensure_dirs, get_path, get_value
-from gnn_pipeline.data.feature_engineering import (
-    create_all_features,
-    print_feature_statistics,
+from gnn_pipeline.artifacts import (
+    create_pipeline_manifest,
+    sha256_file,
+    update_manifest_model,
+    write_json_atomic,
 )
+from gnn_pipeline.config import ensure_dirs, get_path, get_value
+from gnn_pipeline.data.feature_engineering import create_all_features, print_feature_statistics
 from gnn_pipeline.data.graph_builder import build_knowledge_graph_from_dblp
+from gnn_pipeline.data.parsing import build_author_index, save_author_mapping
+from gnn_pipeline.data.topic_assignment import EMBED_MODEL_NAME, prepare_topics
+from gnn_pipeline.data.validation import validate_knowledge_graph, validate_papers_dataframe
 from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
-from gnn_pipeline.models.training import train_enhanced_model
+from gnn_pipeline.models.training import set_external_data, train_enhanced_model
 
 
-def parse_authors(authors_str: str) -> List[str]:
-    try:
-        authors = json.loads(authors_str.replace("'", '"'))
-        return [str(a).strip() for a in authors] if isinstance(authors, list) else []
-    except:
-        try:
-            authors = eval(authors_str)
-            return (
-                [str(a).strip() for a in authors] if isinstance(authors, list) else []
-            )
-        except:
-            return []
-
-
-def build_and_train():
+def build_and_train(force_topics: bool = False):
     ensure_dirs()
 
     csv_path = get_path("data", "csv_path")
-    topic_json_path = get_path("data", "topic_json_path")
-    kg_save_path = get_path("models", "knowledge_graph")
-    best_model_new_path = get_path("models", "best_model_new")
+    topic_info_path = get_path("data", "topic_json_path")
+    topic_assignments_path = get_path("data", "topic_assignments_path")
+    topic_centroids_path = get_path("data", "topic_centroids_path")
+    graph_path = get_path("models", "knowledge_graph")
+    model_path = get_path("models", "best_model_new")
+    author_mapping_path = get_path("models", "author_mapping")
+    manifest_path = get_path("models", "pipeline_manifest")
 
-    if not csv_path:
-        print("Error: Set data.csv_path in config.yaml before running.")
-        return
-
-    print("1. Loading Data...")
+    print("1. Loading and validating papers...")
     df = pd.read_csv(csv_path)
+    data_stats = validate_papers_dataframe(df)
+    dataset_sha256 = sha256_file(csv_path)
+    print(f"Dataset: {data_stats}")
 
-    topic_info_dict = {}
-    if topic_json_path and os.path.isfile(topic_json_path):
-        with open(topic_json_path, "r") as f:
-            topic_info_dict = json.load(f)
-            topic_info_dict = {int(k): v for k, v in topic_info_dict.items()}
-    else:
-        print("No topic_json_path set (or file not found). Generating topics...")
-        from gnn_pipeline.data.topic_assignment import assign_topics_to_dblp
-
-        n_clusters = get_value("training", "n_clusters")
-        df, _, topic_info_dict = assign_topics_to_dblp(df, n_clusters=n_clusters)
-
-        cache_path = os.path.join(
-            os.path.dirname(get_path("models", "best_model")),
-            "topic_info_new.json",
-        )
-        with open(cache_path, "w") as f:
-            json.dump({str(k): v for k, v in topic_info_dict.items()}, f, indent=2)
-        print(f"Topics cached to {cache_path}")
-        print("  Set data.topic_json_path in config.yaml to reuse on next run.")
-
-    print(f"Loaded {len(df)} papers and {len(topic_info_dict)} topics.")
-
-    df["authors_parsed"] = df["authors"].apply(parse_authors)
-    all_authors = []
-    for al in df["authors_parsed"]:
-        all_authors.extend(al)
-
-    unique_authors = list(sorted(set(all_authors)))
-    author_to_idx = {author: idx for idx, author in enumerate(unique_authors)}
-    df["author_indices"] = df["authors_parsed"].apply(
-        lambda authors: [author_to_idx[a] for a in authors]
+    print("\n2. Loading or generating versioned topics...")
+    n_clusters = get_value("training", "n_clusters")
+    df, topic_info, topic_assigner, generated = prepare_topics(
+        df,
+        n_clusters=n_clusters,
+        assignments_path=topic_assignments_path,
+        topic_info_path=topic_info_path,
+        centroids_path=topic_centroids_path,
+        dataset_sha256=dataset_sha256,
+        force_regenerate=force_topics,
     )
+    print(f"Topics: {len(topic_info)} ({'generated' if generated else 'loaded'})")
 
-    print("2. Creating Features...")
+    print("\n3. Resolving stable author identities...")
+    author_to_idx, author_records, paper_author_indices, author_stats = build_author_index(df)
+    df["author_indices"] = paper_author_indices
+    df["authors_parsed"] = [
+        [author_records[idx]["author_key"] for idx in indices]
+        for indices in paper_author_indices
+    ]
+    save_author_mapping(author_records, author_mapping_path)
+    print(f"Authors: {author_stats}")
+
+    print("\n4. Engineering features...")
     paper_features, author_features, topic_features, feature_info = create_all_features(
-        df, topic_info_dict, author_to_idx
+        df, topic_info, author_to_idx
     )
     print_feature_statistics(feature_info)
 
-    print("\n3. Building Knowledge Graph...")
+    print("\n5. Building and validating the heterogeneous graph...")
     graph, topic_names, _ = build_knowledge_graph_from_dblp(
         df,
         author_to_idx,
-        topic_info_dict,
+        topic_info,
         paper_features,
         author_features,
         topic_features,
-        save_path=kg_save_path,
+        save_path=graph_path,
     )
-
-    print("\n4. Initializing GNN Model...")
-    num_papers = graph["paper"].num_nodes
-    num_authors = graph["author"].num_nodes
-    num_topics = graph["topic"].num_nodes
-
-    print(
-        f"Graph nodes -> Papers: {num_papers}, Authors: {num_authors}, Topics: {num_topics}"
+    graph_stats = validate_knowledge_graph(
+        graph,
+        expected_papers=len(df),
+        expected_authors=len(author_records),
+        expected_topics=len(topic_info),
     )
+    print(f"Graph: {graph_stats}")
 
+    manifest = create_pipeline_manifest(
+        csv_path=csv_path,
+        graph_path=graph_path,
+        author_mapping_path=author_mapping_path,
+        topic_assignments_path=topic_assignments_path,
+        topic_info_path=topic_info_path,
+        topic_centroids_path=topic_centroids_path,
+        embedding_model=EMBED_MODEL_NAME,
+        n_clusters=len(topic_info),
+        graph_stats={**graph_stats, "data_validation": data_stats, "author_identity": author_stats},
+    )
+    write_json_atomic(manifest_path, manifest)
+    print(f"Manifest: {manifest_path}")
+
+    print("\n6. Training the versioned GNN...")
     model = AdvancedHeteroGCN(
         hidden_channels=get_value("training", "hidden_channels"),
         out_channels=get_value("training", "out_channels"),
         num_layers=get_value("training", "num_layers"),
         num_classes=get_value("training", "num_classes"),
-        num_topics=num_topics,
+        num_topics=len(topic_info),
     )
-    from gnn_pipeline.models.training import set_external_data
-
     set_external_data(df, author_to_idx)
-
-    print("\n5. Training GNN...")
-    epochs = get_value("training", "epochs")
     trained_model, train_losses, val_metrics, *_ = train_enhanced_model(
-        model, graph, epochs=epochs
+        model,
+        graph,
+        epochs=get_value("training", "epochs"),
+        checkpoint_path=model_path,
+        pipeline_id=manifest["pipeline_id"],
     )
+    update_manifest_model(manifest_path, model_path, trained_model.get_config())
 
-    best_model_path = get_path("models", "best_model")
-    if os.path.exists(best_model_path):
-        os.rename(best_model_path, best_model_new_path)
-        print(f"Moved best weights to {best_model_new_path}")
-    else:
-        torch.save(trained_model.state_dict(), best_model_new_path)
-        print(f"Saved model weights to {best_model_new_path}")
-
-    print("\nPipeline Complete!")
+    print("\nPipeline complete.")
+    print(f"Model: {model_path}")
+    print(f"Final training loss: {train_losses[-1] if train_losses else 'N/A'}")
+    return trained_model, graph, manifest
 
 
 if __name__ == "__main__":
-    build_and_train()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--force-topics",
+        action="store_true",
+        help="Explicitly regenerate topic assignments and centroids",
+    )
+    args = parser.parse_args()
+    build_and_train(force_topics=args.force_topics)

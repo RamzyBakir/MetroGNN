@@ -14,13 +14,16 @@ import numpy as np
 import pandas as pd
 import torch
 
+from gnn_pipeline.artifacts import validate_pipeline_manifest
 from gnn_pipeline.config import get_path
+from gnn_pipeline.data.parsing import load_author_mapping
 from gnn_pipeline.data.vector_store import PaperVectorStore
+from gnn_pipeline.models.checkpoint import load_model_for_pipeline
 from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
 
 # ── Label maps ──────────────────────────────────────────────────────────
 IMPORTANCE_LABELS = {0: "Low", 1: "Medium", 2: "High"}
-ROLE_LABELS = {0: "Hub", 1: "Active", 2: "Occasional", 3: "Isolated"}
+ROLE_LABELS = {0: "Leader", 1: "Core", 2: "Contributor", 3: "Sole Expert"}
 
 
 class GNNInferencer:
@@ -38,6 +41,16 @@ class GNNInferencer:
         self.graph_path = graph_path or get_path("models", "knowledge_graph")
         self.papers_csv = papers_csv or get_path("data", "csv_path")
         self.vector_store_dir = vector_store_dir or get_path("models", "vector_store")
+        self.manifest_path = get_path("models", "pipeline_manifest")
+        self.author_mapping_path = get_path("models", "author_mapping")
+        self.vector_manifest_path = get_path("models", "vector_store_manifest")
+
+        # Validate the dataset/artifact family before loading trusted tensors.
+        self._manifest = validate_pipeline_manifest(
+            self.manifest_path,
+            csv_path=self.papers_csv,
+            graph_path=self.graph_path,
+        )
 
         # Lazy-loaded
         self._model: Optional[AdvancedHeteroGCN] = None
@@ -45,24 +58,17 @@ class GNNInferencer:
         self._papers_df: Optional[pd.DataFrame] = None
         self._vector_store: Optional[PaperVectorStore] = None
         self._author_predictions: Optional[Dict[int, Dict]] = None
+        self._author_records: Optional[Dict[int, Dict]] = None
+        self._topic_names: Optional[Dict[int, str]] = None
 
     # ── Lazy loaders ────────────────────────────────────────────────────
 
     @property
     def model(self) -> AdvancedHeteroGCN:
         if self._model is None:
-            self._model = AdvancedHeteroGCN(
-                hidden_channels=64,
-                out_channels=32,
-                num_layers=4,
-                num_classes=3,
-                num_topics=8,
+            self._model, _ = load_model_for_pipeline(
+                self.model_path, self.manifest_path, map_location="cpu"
             )
-            state_dict = torch.load(
-                self.model_path, map_location="cpu", weights_only=False
-            )
-            self._model.load_state_dict(state_dict)
-            self._model.eval()
         return self._model
 
     @property
@@ -71,6 +77,8 @@ class GNNInferencer:
             self._graph = torch.load(
                 self.graph_path, map_location="cpu", weights_only=False
             )
+            if getattr(self._graph, "pipeline_schema_version", None) != 2:
+                raise RuntimeError("Knowledge graph is not a v2 graph")
         return self._graph
 
     @property
@@ -82,8 +90,27 @@ class GNNInferencer:
     @property
     def vector_store(self) -> PaperVectorStore:
         if self._vector_store is None:
-            self._vector_store = PaperVectorStore(persist_dir=self.vector_store_dir)
+            self._vector_store = PaperVectorStore(
+                persist_dir=self.vector_store_dir,
+                manifest_path=self.vector_manifest_path,
+            )
+            self._vector_store.validate_compatibility(
+                csv_path=self.papers_csv,
+                topic_assignments_path=get_path("data", "topic_assignments_path"),
+                pipeline_id=self._manifest["pipeline_id"],
+            )
         return self._vector_store
+
+    @property
+    def topic_names(self) -> Dict[int, str]:
+        if self._topic_names is None:
+            with open(get_path("data", "topic_json_path"), "r") as handle:
+                raw = json.load(handle)
+            self._topic_names = {
+                int(key): value.get("name", f"Topic {key}")
+                for key, value in raw.items()
+            }
+        return self._topic_names
 
     # ── Full-graph GNN (run once, cached) ───────────────────────────────
 
@@ -125,10 +152,17 @@ class GNNInferencer:
             graph["author"].x if "author" in graph.node_types else graph["researcher"].x
         )
 
+        if self._author_records is None:
+            self._author_records = load_author_mapping(self.author_mapping_path)
+
         self._author_predictions = {}
         for i in range(num_authors):
+            identity = self._author_records.get(i, {})
             self._author_predictions[i] = {
                 "author_id": i,
+                "author_key": identity.get("author_key", ""),
+                "name": identity.get("name", ""),
+                "organization": identity.get("organization", ""),
                 "importance_class": int(imp_cls[i]) if imp_cls is not None else None,
                 "importance_label": IMPORTANCE_LABELS.get(int(imp_cls[i]), "Unknown")
                 if imp_cls is not None
@@ -149,9 +183,6 @@ class GNNInferencer:
                 else 0.0,
                 "years_active": float(author_features[i, 3].item())
                 if author_features is not None and author_features.shape[1] > 3
-                else 0.0,
-                "citation_impact": float(author_features[i, 4].item())
-                if author_features is not None and author_features.shape[1] > 4
                 else 0.0,
             }
 
@@ -271,7 +302,11 @@ def run_inference(
                 else 0,
                 "venue": row.get("venue", ""),
                 "topic_id": int(topic_id) if topic_id >= 0 else None,
-                "topic_name": f"Topic {int(topic_id)}" if topic_id >= 0 else "",
+                "topic_name": inferencer.topic_names.get(
+                    int(topic_id), f"Topic {int(topic_id)}"
+                )
+                if topic_id >= 0
+                else "",
                 "authors": authors_data,
                 "aggregated_influence": agg_influence,
                 "semantic_similarity": semantic_sim,

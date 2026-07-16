@@ -22,7 +22,12 @@ class AppContext:
     topic_names: Optional[Dict] = None
     papers_df: Any = None
     author_to_idx: Optional[Dict] = None
+    author_records: Optional[Dict[int, Dict]] = None
+    vector_store: Any = None
+    pipeline_manifest: Optional[Dict[str, Any]] = None
     author_predictions: Optional[Dict[int, Dict]] = None
+    paper_author_edges: Optional[Dict[int, list]] = None
+    paper_topic_edges: Optional[Dict[int, int]] = None
     importance_logits: Any = None
     role_logits: Any = None
     influence_scores: Any = None
@@ -54,7 +59,8 @@ mcp = FastMCP(
     instructions=(
         "MetroGNN MCP server — tools for building, querying, and analyzing "
         "a heterogeneous GNN over the DBLP academic citation network. "
-        "Typical workflow: build_vector_store -> train_pipeline -> run_inference. "
+        "Typical administrative workflow: train_pipeline -> build_vector_store. "
+        "Query workflow: query_papers or run_inference. "
         "Use detect_topics and analyze_community for deeper exploration."
     ),
 )

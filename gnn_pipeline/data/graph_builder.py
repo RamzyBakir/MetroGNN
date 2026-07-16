@@ -4,6 +4,9 @@ from torch_geometric.data import HeteroData
 import pandas as pd
 from typing import Dict, Tuple, Optional
 
+from gnn_pipeline.artifacts import GRAPH_SCHEMA_VERSION
+from gnn_pipeline.data.parsing import parse_list_field
+
 
 def create_meaningful_node_features(num_researchers=20, num_papers=30, num_topics=8):
 
@@ -173,8 +176,8 @@ def build_knowledge_graph_from_dblp(
     Build HeteroData from DBLP data and computed features.
 
     Args:
-        df: DataFrame with papers (must have 'author_indices' and 'topic_id' columns)
-        author_to_idx: Mapping from author name to index
+        df: DataFrame with stable paper IDs, references, author_indices, and topic_id
+        author_to_idx: Mapping from stable author key to index
         topic_info_dict: Topic information dictionary
         paper_features: Precomputed paper features (num_papers, 7)
         author_features: Precomputed author features (num_authors, 6)
@@ -187,6 +190,7 @@ def build_knowledge_graph_from_dblp(
         topic_info_dict: Same as input (for reference)
     """
     data = HeteroData()
+    data.pipeline_schema_version = GRAPH_SCHEMA_VERSION
 
     # Set node features
     data["paper"].x = torch.FloatTensor(paper_features)
@@ -215,12 +219,14 @@ def build_knowledge_graph_from_dblp(
     ).contiguous()
 
     # Build paper-topic edges (paper -> topic)
+    if "topic_id" not in df_reset.columns:
+        raise ValueError("The paper DataFrame has no persisted topic assignments")
     paper_topic_edges = []
-    for idx, row in df.iterrows():
-        paper_id = idx
-        topic_id = row.get("topic_id", 0)
-        if topic_id >= 0 and paper_id < paper_features.shape[0]:
-            paper_topic_edges.append([paper_id, topic_id])
+    for paper_id, row in df_reset.iterrows():
+        topic_id = int(row["topic_id"])
+        if not 0 <= topic_id < topic_features.shape[0]:
+            raise ValueError(f"Invalid topic_id={topic_id} for paper {paper_id}")
+        paper_topic_edges.append([paper_id, topic_id])
 
     data["paper", "has_topic", "topic"].edge_index = (
         torch.tensor(paper_topic_edges, dtype=torch.long).t().contiguous()
@@ -230,6 +236,27 @@ def build_knowledge_graph_from_dblp(
     has_topic_edge_index = data["paper", "has_topic", "topic"].edge_index
     data["topic", "has_paper", "paper"].edge_index = torch.stack(
         [has_topic_edge_index[1], has_topic_edge_index[0]]
+    ).contiguous()
+
+    # Build in-subset citation edges (paper -> paper).
+    paper_id_to_idx = {
+        str(paper_id): idx for idx, paper_id in enumerate(df_reset["id"].tolist())
+    }
+    citation_edges = set()
+    for source_idx, row in df_reset.iterrows():
+        for referenced_id in parse_list_field(row.get("references", [])):
+            target_idx = paper_id_to_idx.get(str(referenced_id))
+            if target_idx is not None and target_idx != source_idx:
+                citation_edges.add((int(source_idx), int(target_idx)))
+
+    sorted_citations = sorted(citation_edges)
+    if sorted_citations:
+        citation_tensor = torch.tensor(sorted_citations, dtype=torch.long).t().contiguous()
+    else:
+        citation_tensor = torch.empty((2, 0), dtype=torch.long)
+    data["paper", "cites", "paper"].edge_index = citation_tensor
+    data["paper", "cited_by", "paper"].edge_index = torch.stack(
+        [citation_tensor[1], citation_tensor[0]]
     ).contiguous()
 
     # Build collaboration edges (author -> author)
@@ -252,7 +279,9 @@ def build_knowledge_graph_from_dblp(
 
     if collab_edges:
         collab_tensor = torch.tensor(collab_edges, dtype=torch.long).t().contiguous()
-        data["author", "collaborates_with", "author"].edge_index = collab_tensor
+    else:
+        collab_tensor = torch.empty((2, 0), dtype=torch.long)
+    data["author", "collaborates_with", "author"].edge_index = collab_tensor
 
     # Create topic names dictionary (use dynamic topic names)
     topic_names = {tid: topic_info_dict[tid]["name"] for tid in topic_info_dict.keys()}

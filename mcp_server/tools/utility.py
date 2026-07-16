@@ -21,11 +21,17 @@ async def get_graph_info(ctx: Context) -> GraphInfoOutput:
     app = _get_ctx(ctx)
 
     if not app.is_graph_ready():
+        from gnn_pipeline.artifacts import validate_pipeline_manifest
         from gnn_pipeline.config import get_path
         import torch
 
         graph_path = get_path("models", "knowledge_graph")
         try:
+            validate_pipeline_manifest(
+                get_path("models", "pipeline_manifest"),
+                csv_path=get_path("data", "csv_path"),
+                graph_path=graph_path,
+            )
             app.graph = torch.load(graph_path, map_location="cpu", weights_only=False)
             app._graph_loaded = True
         except FileNotFoundError:
