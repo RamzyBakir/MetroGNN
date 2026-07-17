@@ -1,0 +1,19 @@
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.spinospace
+*.zip
+
+# Runtime data is mounted by docker-compose.yml.
+train/
+models/
+saved_results/
