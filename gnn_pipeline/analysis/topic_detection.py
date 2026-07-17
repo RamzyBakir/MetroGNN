@@ -1,3 +1,8 @@
+import re
+
+import numpy as np
+
+
 def calculate_topic_relevance_score(
     query: str, topic_info_dict: dict, detected_topic_ids: list
 ) -> dict:
@@ -144,11 +149,11 @@ def extract_topics_from_query_dynamic(
     query: str, topic_assigner, topic_info_dict: dict
 ) -> list:
     """
-    Match user query to dynamic topics using TF-IDF similarity + fuzzy matching.
+    Match user query to dynamic topics using the fitted topic assignment model.
 
     Args:
         query: User query string
-        topic_assigner: TopicAssigner instance with fitted vectorizer and cluster centers
+        topic_assigner: Fitted TopicAssigner instance
         topic_info_dict: Topic information dictionary
 
     Returns:
@@ -159,13 +164,33 @@ def extract_topics_from_query_dynamic(
     except ImportError:
         return list(topic_info_dict.keys())[:2]
 
-    # Preprocess query
-    query_clean = topic_assigner.preprocess_text(query)
+    query_clean = re.sub(r"\s+", " ", str(query).strip())
 
     if not query_clean or not query_clean.strip():
         return list(topic_info_dict.keys())[:2]
 
-    # Get vectorizer and cluster centers
+    # Current TopicAssigner uses sentence embeddings and K-Means centers.
+    if getattr(topic_assigner, "cluster_centers_", None) is not None and hasattr(
+        topic_assigner, "embed_model"
+    ):
+        try:
+            query_vector = topic_assigner.embed_model.encode([query_clean])[0]
+            cluster_centers = topic_assigner.cluster_centers_
+            similarities = cosine_similarity([query_vector], cluster_centers)[0]
+            return _rank_topics_with_keyword_boost(
+                similarities, query_clean, topic_info_dict
+            )
+        except Exception:
+            return fallback_keyword_match(query_clean, topic_info_dict)[:2]
+
+    # Backward compatibility for older TF-IDF based assigners.
+    if not all(
+        hasattr(topic_assigner, attr)
+        for attr in ("preprocess_text", "get_vectorizer", "get_cluster_centers")
+    ):
+        return fallback_keyword_match(query_clean, topic_info_dict)[:2]
+
+    query_clean = topic_assigner.preprocess_text(query_clean)
     vectorizer = topic_assigner.get_vectorizer()
     cluster_centers = topic_assigner.get_cluster_centers()
 
@@ -179,28 +204,34 @@ def extract_topics_from_query_dynamic(
         # Compute cosine similarity to each cluster center
         similarities = cosine_similarity([query_vector], cluster_centers)[0]
 
-        # Add fuzzy matching boost for keywords
-        keyword_boosts = np.zeros(len(similarities))
-        query_terms = query_clean.lower().split()
-
-        for topic_id, info in topic_info_dict.items():
-            top_terms = info.get("top_terms", [])
-            for term in query_terms:
-                for top_term in top_terms:
-                    # Simple fuzzy match (partial string matching)
-                    if term in top_term.lower() or top_term.lower() in term:
-                        keyword_boosts[int(topic_id)] += 0.1
-
-        # Combine scores
-        final_scores = similarities + keyword_boosts
-
-        # Get top 2 topics
-        top_indices = final_scores.argsort()[-2:][::-1]
-
-        return top_indices.tolist()
-    except Exception as e:
-        # Fallback: use simple keyword matching
+        return _rank_topics_with_keyword_boost(similarities, query_clean, topic_info_dict)
+    except Exception:
         return fallback_keyword_match(query_clean, topic_info_dict)[:2]
+
+
+def _rank_topics_with_keyword_boost(
+    similarities: np.ndarray, query: str, topic_info_dict: dict, n_results: int = 2
+) -> list:
+    keyword_boosts = np.zeros(len(similarities))
+    query_terms = query.lower().split()
+
+    for topic_id, info in topic_info_dict.items():
+        top_terms = info.get("top_terms", [])
+        try:
+            topic_idx = int(topic_id)
+        except (TypeError, ValueError):
+            continue
+        if topic_idx < 0 or topic_idx >= len(keyword_boosts):
+            continue
+
+        for term in query_terms:
+            for top_term in top_terms:
+                top_term = str(top_term).lower()
+                if term in top_term or top_term in term:
+                    keyword_boosts[topic_idx] += 0.1
+
+    final_scores = similarities + keyword_boosts
+    return final_scores.argsort()[-n_results:][::-1].tolist()
 
 
 def fallback_keyword_match(
