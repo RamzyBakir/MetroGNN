@@ -53,6 +53,18 @@ Runs the inference CLI directly.
 - `-k` is the number of vector-store retrieval candidates.
 - `--output` writes JSON output inside the container.
 
+Because `/tmp/inference.json` is inside the temporary container, that file is
+removed when `--rm` deletes the container. To keep the JSON output on your host
+machine, write it to the mounted `saved_results` folder instead:
+
+```powershell
+docker compose run --rm metrogenn python -m gnn_pipeline.inference -q "graph neural networks" -t 3 -k 10 --output /app/saved_results/inference.json
+```
+
+This creates `saved_results/inference.json` in the project folder on your
+machine. The container path `/app/saved_results` is mapped to the local
+`./saved_results` folder by `docker-compose.yml`.
+
 ## Run The Full Pipeline Test
 
 ```powershell
