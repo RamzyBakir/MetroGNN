@@ -14,7 +14,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from gnn_pipeline.config import get_path
+from gnn_pipeline.config import get_path, get_value
+from gnn_pipeline.models.checkpoint import load_compatible_state_dict
 from gnn_pipeline.data.vector_store import PaperVectorStore
 from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
 
@@ -51,15 +52,20 @@ class GNNInferencer:
     @property
     def model(self) -> AdvancedHeteroGCN:
         if self._model is None:
-            self._model = AdvancedHeteroGCN(
-                hidden_channels=64,
-                out_channels=32,
-                num_layers=4,
-                num_classes=3,
-                num_topics=8,
+            best_model_path = get_path("models", "best_model")
+            selected_path, state_dict = load_compatible_state_dict(
+                [self.model_path, best_model_path], self.graph
             )
-            state_dict = torch.load(
-                self.model_path, map_location="cpu", weights_only=False
+            if selected_path != self.model_path:
+                print(f"Note: {self.model_path} is incompatible, using {selected_path}")
+                self.model_path = selected_path
+
+            self._model = AdvancedHeteroGCN(
+                hidden_channels=get_value("training", "hidden_channels"),
+                out_channels=get_value("training", "out_channels"),
+                num_layers=get_value("training", "num_layers"),
+                num_classes=get_value("training", "num_classes"),
+                num_topics=self.graph["topic"].num_nodes,
             )
             self._model.load_state_dict(state_dict)
             self._model.eval()

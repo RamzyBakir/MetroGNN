@@ -30,24 +30,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gnn_pipeline.config import ensure_dirs, get_path, get_value
 from gnn_pipeline.evaluation import GNNEvaluator, StatisticalTester
+from gnn_pipeline.models.checkpoint import load_compatible_state_dict
 from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
 from gnn_pipeline.models.training import set_external_data
 
 
 def load_model_and_graph(device: str):
     model_path = get_path("models", "best_model_new")
+    fallback_model_path = get_path("models", "best_model")
     graph_path = get_path("models", "knowledge_graph")
 
-    if not os.path.isfile(model_path):
-        fallback = get_path("models", "best_model")
-        if os.path.isfile(fallback):
-            print(f"Note: {model_path} not found, using {fallback}")
-            model_path = fallback
-        else:
-            raise FileNotFoundError(
-                f"No trained model found at {model_path} or {fallback}. "
-                "Run scripts/train_pipeline.py first."
-            )
     if not os.path.isfile(graph_path):
         raise FileNotFoundError(
             f"Knowledge graph not found at {graph_path}. "
@@ -58,6 +50,12 @@ def load_model_and_graph(device: str):
     graph = torch.load(graph_path, map_location="cpu", weights_only=False)
 
     num_topics = graph["topic"].num_nodes
+    model_path, state_dict = load_compatible_state_dict(
+        [model_path, fallback_model_path], graph
+    )
+    if model_path != get_path("models", "best_model_new"):
+        print(f"Note: best_model_new is incompatible or missing, using {model_path}")
+
     print(f"Loading model from {model_path} ...")
     model = AdvancedHeteroGCN(
         hidden_channels=get_value("training", "hidden_channels"),
@@ -66,7 +64,6 @@ def load_model_and_graph(device: str):
         num_classes=get_value("training", "num_classes"),
         num_topics=num_topics,
     )
-    state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state_dict)
     model = model.to(device)
 
