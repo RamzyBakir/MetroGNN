@@ -176,3 +176,62 @@ python scripts/profile_serving.py --runs 20 --query "graph neural networks"
 These write JSON profiles with artifact validation/load times, target
 construction and training-step latency, warm GNN forward latency, and optional
 end-to-end query latency.
+
+## Phase 3 model experiments
+
+Phase 3 uses frozen MiniLM or scholarly SPECTER text embeddings, temporal graph
+snapshots, deterministic positive/unjudged pair sampling, feature rankers, a text
+dual encoder, citation GraphSAGE, heterogeneous GraphSAGE, and HGT. Expensive
+steps are always explicit:
+
+```bash
+# Build one frozen embedding cache (downloads/encodes only when invoked).
+python scripts/build_recommendation_embeddings.py --embedding minilm
+
+# Build training and validation snapshots; the 2023 final-test cutoff is omitted.
+python scripts/build_temporal_graphs.py --embedding minilm --relations full
+
+# Build reproducible random and TF-IDF hard-negative pairs.
+python scripts/prepare_recommendation_samples.py --embedding minilm
+
+# Evaluate frozen retrieval on validation only.
+python scripts/evaluate_embedding_retrieval.py --embedding minilm
+
+# Tune one model family on validation only, then freeze the five-seed winner.
+python scripts/tune_recommendation_model.py \
+  --embedding minilm --architecture hetero_sage --relations full
+```
+
+The active v2 protocol uses residual text/graph transformations initialized to
+exactly preserve the frozen MiniLM geometry. Epoch 0 is evaluated and eligible
+for selection. A predeclared neural fusion weight in `[0, 0.25, 0.5, 0.75, 1]`
+is selected on validation; zero exactly recovers TF-IDF, preventing destructive
+random projections from being mistaken for useful learning. The original v1
+configuration and outputs remain preserved.
+
+The coarse search is capped at 12 configurations. Only its top two validation
+configurations are repeated over the five declared seeds. Selection uses
+validation nDCG@10, with Recall@20 as a tie-breaker.
+
+Relation and feature ablations are predeclared in
+`configs/experiments/phase3_model_validation_v2.yaml` and run only on validation.
+Graph snapshots use cutoffs 2020/2021 for training and 2022 for validation. Topic
+clusters are fitted only on the training partition. Snapshot citation edges never
+contain the query-year positive links.
+
+Final evaluation is deliberately separate. Both frozen retrieval caches must be
+built so MiniLM and SPECTER are evaluated in the same one-time event. After a
+model is frozen, build the 2023 graph cutoff explicitly with
+`--include-final-test`, then invoke
+`run_final_recommendation_test.py --final-test ...`, for example:
+
+```bash
+python scripts/run_final_recommendation_test.py --final-test \
+  --frozen-selection saved_results/phase3_validation_v2/minilm/hetero_sage/full/frozen_selection.json \
+  --embedding minilm --architecture hetero_sage --relations full
+```
+
+A registry binds the frozen selection, five checkpoint hashes, benchmark,
+embedding/architecture context, both frozen retrieval caches, and the existing
+baseline run. It refuses a second final-test execution for the same experiment
+ID.

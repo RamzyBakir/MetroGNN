@@ -117,11 +117,17 @@ class TfidfRecommender(Recommender):
             raise ValueError("Candidate corpus changed for an already-indexed year")
         return ids, vectorizer, matrix
 
-    def rank(self, query, candidates, top_k, seed, visible_citation_edges=None):
-        ids, vectorizer, matrix = self._index(int(query["query_year"]), candidates)
+    def prepare(self, query, candidates, visible_citation_edges=None):
+        self._index(int(query["query_year"]), candidates)
+
+    def score_candidates(self, query, candidates) -> np.ndarray:
+        _, vectorizer, matrix = self._index(int(query["query_year"]), candidates)
         query_vector = vectorizer.transform([str(query["query_text"])])
-        scores = (matrix @ query_vector.T).toarray().ravel()
-        return _rank_scores(ids, scores, top_k)
+        return (matrix @ query_vector.T).toarray().ravel()
+
+    def rank(self, query, candidates, top_k, seed, visible_citation_edges=None):
+        ids, _, _ = self._index(int(query["query_year"]), candidates)
+        return _rank_scores(ids, self.score_candidates(query, candidates), top_k)
 
 
 class BM25Recommender(Recommender):
@@ -156,7 +162,10 @@ class BM25Recommender(Recommender):
             raise ValueError("Candidate corpus changed for an already-indexed year")
         return index
 
-    def rank(self, query, candidates, top_k, seed, visible_citation_edges=None):
+    def prepare(self, query, candidates, visible_citation_edges=None):
+        self._index(int(query["query_year"]), candidates)
+
+    def score_candidates(self, query, candidates) -> np.ndarray:
         index = self._index(int(query["query_year"]), candidates)
         scores = np.zeros(len(index["ids"]), dtype=float)
         avg_length = max(index["avg_length"], 1.0)
@@ -175,7 +184,11 @@ class BM25Recommender(Recommender):
             scores += idf * (frequencies * (self.k1 + 1.0)) / np.maximum(
                 denominator, 1e-12
             )
-        return _rank_scores(index["ids"], scores, top_k)
+        return scores
+
+    def rank(self, query, candidates, top_k, seed, visible_citation_edges=None):
+        index = self._index(int(query["query_year"]), candidates)
+        return _rank_scores(index["ids"], self.score_candidates(query, candidates), top_k)
 
 
 class SentenceEmbeddingRecommender(Recommender):
@@ -227,6 +240,9 @@ class SentenceEmbeddingRecommender(Recommender):
             raise ValueError("Candidate corpus changed for an already-indexed year")
         return ids, embeddings
 
+    def prepare(self, query, candidates, visible_citation_edges=None):
+        self._index(int(query["query_year"]), candidates)
+
     def rank(self, query, candidates, top_k, seed, visible_citation_edges=None):
         ids, embeddings = self._index(int(query["query_year"]), candidates)
         query_embedding = self.model.encode(
@@ -263,6 +279,11 @@ class SemanticSeededPPRRecommender(Recommender):
             )
             self._graphs[query_year] = graph
         return self._graphs[query_year]
+
+    def prepare(self, query, candidates, visible_citation_edges=None):
+        self.semantic.prepare(query, candidates, visible_citation_edges)
+        if visible_citation_edges is not None:
+            self._graph(int(query["query_year"]), candidates, visible_citation_edges)
 
     def rank(self, query, candidates, top_k, seed, visible_citation_edges=None):
         if visible_citation_edges is None:

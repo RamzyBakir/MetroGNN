@@ -56,24 +56,33 @@ def generate_markdown_report(
             )
 
     if timings is not None and not timings.empty:
-        latency = (
-            timings.groupby(["method", "split"])["latency_ms"]
-            .agg(["median", lambda values: values.quantile(0.95), "count"])
-            .reset_index()
-        )
-        latency.columns = ["method", "split", "p50_ms", "p95_ms", "queries"]
+        aggregations = {
+            "latency_ms": ["median", lambda values: values.quantile(0.95), "count"]
+        }
+        if "prepare_ms" in timings.columns:
+            aggregations["prepare_ms"] = ["first"]
+        latency = timings.groupby(["method", "split"]).agg(aggregations).reset_index()
+        latency.columns = [
+            "method",
+            "split",
+            "p50_ms",
+            "p95_ms",
+            "queries",
+            *(["prepare_ms"] if "prepare_ms" in timings.columns else []),
+        ]
         lines.extend(
             [
                 "",
                 "## Query latency",
                 "",
-                "| Method | Split | Measurements | p50 ms | p95 ms |",
-                "|---|---|---:|---:|---:|",
+                "| Method | Split | Measurements | Index preparation ms | p50 ms | p95 ms |",
+                "|---|---|---:|---:|---:|---:|",
             ]
         )
         for row in latency.itertuples(index=False):
             lines.append(
                 f"| {row.method} | {row.split} | {row.queries} | "
+                f"{getattr(row, 'prepare_ms', 0.0):.2f} | "
                 f"{row.p50_ms:.2f} | {row.p95_ms:.2f} |"
             )
 

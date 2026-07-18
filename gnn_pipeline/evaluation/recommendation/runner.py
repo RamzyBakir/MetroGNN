@@ -20,7 +20,7 @@ from .metrics import aggregate_metrics, evaluate_rankings, validate_predictions
 from .statistics import bootstrap_mean_ci, summarize_repeated_seeds
 
 
-RUN_SCHEMA_VERSION = 1
+RUN_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -67,6 +67,7 @@ def load_experiment_config(path: str) -> Dict:
 
 def _run_id(benchmark_id: str, method_configs: Sequence[Dict], seeds: Sequence[int], splits) -> str:
     value = {
+        "run_schema_version": RUN_SCHEMA_VERSION,
         "benchmark_id": benchmark_id,
         "method_configs": list(method_configs),
         "seeds": [int(seed) for seed in seeds],
@@ -110,6 +111,16 @@ def run_recommenders(
         for split in splits:
             queries = benchmark.split_queries(split)
             for seed in method_seeds:
+                first_query = pd.Series(queries.iloc[0])
+                first_candidates = benchmark.candidates_for_query(first_query)
+                first_edges = benchmark.visible_citation_edges(first_query)
+                prepare_start = time.perf_counter()
+                recommender.prepare(
+                    first_query,
+                    first_candidates,
+                    visible_citation_edges=first_edges,
+                )
+                prepare_ms = (time.perf_counter() - prepare_start) * 1000.0
                 for query in queries.to_dict("records"):
                     query_series = pd.Series(query)
                     candidates = benchmark.candidates_for_query(query_series)
@@ -151,6 +162,7 @@ def run_recommenders(
                             "seed": int(seed),
                             "split": split,
                             "fit_ms": fit_ms,
+                            "prepare_ms": prepare_ms,
                             "latency_ms": latency_ms,
                             "candidate_count": len(candidates),
                             "benchmark_id": benchmark.benchmark_id,

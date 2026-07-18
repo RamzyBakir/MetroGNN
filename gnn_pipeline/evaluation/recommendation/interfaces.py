@@ -49,6 +49,15 @@ class Recommender(ABC):
         """Fit optional state using training labels and observable graph data only."""
         return self
 
+    def prepare(
+        self,
+        query: pd.Series,
+        candidates: pd.DataFrame,
+        visible_citation_edges: pd.DataFrame | None = None,
+    ) -> None:
+        """Build a cutoff-specific index outside measured warm query latency."""
+        return None
+
     @abstractmethod
     def rank(
         self,
