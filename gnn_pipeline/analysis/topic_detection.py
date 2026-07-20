@@ -1,3 +1,8 @@
+import re
+
+import numpy as np
+
+
 def calculate_topic_relevance_score(
     query: str, topic_info_dict: dict, detected_topic_ids: list
 ) -> dict:
@@ -144,11 +149,88 @@ def extract_topics_from_query(query, topic_names, include_recency=True):
 def extract_topics_from_query_dynamic(
     query: str, topic_assigner, topic_info_dict: dict
 ) -> list:
-    """Match a query to persisted MiniLM topic centroids."""
+    """Match a query to dynamic topic IDs, preferring persisted MiniLM centroids."""
+    query_clean = re.sub(r"\s+", " ", str(query).strip())
+    if not query_clean:
+        return fallback_keyword_match(query_clean, topic_info_dict)[:2]
+
     try:
-        return [topic_id for topic_id, _ in topic_assigner.rank_query_topics(query, top_k=2)]
-    except (AttributeError, RuntimeError, ValueError):
-        return fallback_keyword_match(query, topic_info_dict)[:2]
+        ranked_topics = topic_assigner.rank_query_topics(query_clean, top_k=2)
+        if ranked_topics:
+            return [int(topic_id) for topic_id, _ in ranked_topics]
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        pass
+
+    try:
+        from sklearn.metrics.pairwise import cosine_similarity
+    except ImportError:
+        return fallback_keyword_match(query_clean, topic_info_dict)[:2]
+
+    # Current TopicAssigner uses sentence embeddings and K-Means centers.
+    if getattr(topic_assigner, "cluster_centers_", None) is not None and hasattr(
+        topic_assigner, "embed_model"
+    ):
+        try:
+            query_vector = topic_assigner.embed_model.encode([query_clean])[0]
+            cluster_centers = topic_assigner.cluster_centers_
+            similarities = cosine_similarity([query_vector], cluster_centers)[0]
+            return _rank_topics_with_keyword_boost(
+                similarities, query_clean, topic_info_dict
+            )
+        except Exception:
+            return fallback_keyword_match(query_clean, topic_info_dict)[:2]
+
+    # Backward compatibility for older TF-IDF based assigners.
+    if not all(
+        hasattr(topic_assigner, attr)
+        for attr in ("preprocess_text", "get_vectorizer", "get_cluster_centers")
+    ):
+        return fallback_keyword_match(query_clean, topic_info_dict)[:2]
+
+    query_clean = topic_assigner.preprocess_text(query_clean)
+    vectorizer = topic_assigner.get_vectorizer()
+    cluster_centers = topic_assigner.get_cluster_centers()
+
+    if vectorizer is None or cluster_centers is None:
+        return list(topic_info_dict.keys())[:2]
+
+    try:
+        # Vectorize query using fitted TF-IDF
+        query_vector = vectorizer.transform([query_clean]).toarray()[0]
+
+        # Compute cosine similarity to each cluster center
+        similarities = cosine_similarity([query_vector], cluster_centers)[0]
+
+        return _rank_topics_with_keyword_boost(
+            similarities, query_clean, topic_info_dict
+        )
+    except Exception:
+        return fallback_keyword_match(query_clean, topic_info_dict)[:2]
+
+
+def _rank_topics_with_keyword_boost(
+    similarities: np.ndarray, query: str, topic_info_dict: dict, n_results: int = 2
+) -> list:
+    keyword_boosts = np.zeros(len(similarities))
+    query_terms = query.lower().split()
+
+    for topic_id, info in topic_info_dict.items():
+        top_terms = info.get("top_terms", [])
+        try:
+            topic_idx = int(topic_id)
+        except (TypeError, ValueError):
+            continue
+        if topic_idx < 0 or topic_idx >= len(keyword_boosts):
+            continue
+
+        for term in query_terms:
+            for top_term in top_terms:
+                top_term = str(top_term).lower()
+                if term in top_term or top_term in term:
+                    keyword_boosts[topic_idx] += 0.1
+
+    final_scores = similarities + keyword_boosts
+    return final_scores.argsort()[-n_results:][::-1].tolist()
 
 
 def fallback_keyword_match(
