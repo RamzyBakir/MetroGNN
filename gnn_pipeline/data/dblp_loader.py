@@ -3,7 +3,10 @@ from typing import Dict, List, Tuple
 import pandas as pd
 
 from gnn_pipeline.data.parsing import build_author_index, parse_authors as parse_author_records
-from gnn_pipeline.data.validation import validate_papers_dataframe
+from gnn_pipeline.data.validation import (
+    ensure_paper_identity_columns,
+    validate_papers_dataframe,
+)
 
 
 def load_and_clean_dblp_data(
@@ -20,7 +23,7 @@ def load_and_clean_dblp_data(
         author_to_idx: Mapping from stable author keys to unique indices
         author_list: Stable author keys in graph index order
     """
-    df = pd.read_csv(csv_path)
+    df = ensure_paper_identity_columns(pd.read_csv(csv_path))
     validate_papers_dataframe(df)
 
     print(f"Original dataset: {len(df)} papers")

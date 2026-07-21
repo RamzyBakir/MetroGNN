@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "rating_scale": {
+    "1": "Poor or unsupported",
+    "2": "Weak with major issues",
+    "3": "Adequate with notable gaps",
+    "4": "Strong with minor issues",
+    "5": "Excellent and well grounded"
+  },
+  "criteria": [
+    {
+      "name": "usefulness",
+      "question": "Does the response directly help the user make progress on the research task?"
+    },
+    {
+      "name": "grounding",
+      "question": "Are claims grounded in papers, authors, topics, or tool outputs returned by MetroGNN?"
+    },
+    {
+      "name": "actionability",
+      "question": "Are recommendations specific enough to guide next steps?"
+    },
+    {
+      "name": "personalization",
+      "question": "Does the response respect the stated experience level, interests, and goal?"
+    },
+    {
+      "name": "factuality",
+      "question": "Does the response avoid unsupported or contradicted claims?"
+    }
+  ]
+}

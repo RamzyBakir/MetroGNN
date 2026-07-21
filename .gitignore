@@ -14,5 +14,5 @@ __pycache__/
 /saved_results/
 *.zip
 .spinospace
-/train
-configs/experiments/
+/train/*
+!/train/DBLP-Citation-network-V18-1-20-25_clean.csv

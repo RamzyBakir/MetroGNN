@@ -25,20 +25,45 @@ docker compose build --no-cache
 Forces a clean rebuild without using cached Docker layers. This is slower, but
 useful when you want to prove the image can be rebuilt from scratch.
 
+## First Run On A New Machine
+
+```powershell
+docker compose build
+docker compose run --rm metrogenn
+```
+
+The default run first validates the configured CSV, graph/model/topic artifacts,
+and Chroma vector store. If `models` is empty on a new machine, it bootstraps the
+runtime artifacts with seed `42`, builds the vector store, and then runs the demo
+inference query.
+
+This requires the bundled CSV at:
+
+```powershell
+train/DBLP-Citation-network-V18-1-20-25_clean.csv
+```
+
+You can run the bootstrap step explicitly with:
+
+```powershell
+docker compose run --rm metrogenn python scripts/bootstrap_artifacts.py
+```
+
 ## Run Default Inference
 
 ```powershell
 docker compose run --rm metrogenn
 ```
 
-Runs the default command from `docker-compose.yml`, which executes:
+Runs the default command from `docker-compose.yml`, which validates or creates
+runtime artifacts and then executes:
 
 ```powershell
 python scripts/run_inference.py
 ```
 
-Use this as the quick smoke test that the image, mounted models, vector store,
-and inference path work.
+Use this as the quick smoke test that the image, mounted data, mounted models,
+vector store, and inference path work.
 
 ## Run A Custom Query
 
@@ -65,22 +90,21 @@ This creates `saved_results/inference.json` in the project folder on your
 machine. The container path `/app/saved_results` is mapped to the local
 `./saved_results` folder by `docker-compose.yml`.
 
-## Run The Full Pipeline Test
+## Run The Lightweight Validation Suite
 
 ```powershell
 docker compose run --rm metrogenn python scripts/test_pipeline.py
 ```
 
-Runs the end-to-end integration test:
+Runs the non-mutating validation suite:
 
-- loads the DBLP CSV from `train`
-- assigns dynamic topics
-- creates feature matrices
-- builds the knowledge graph
-- trains the GNN for a short validation run
-- tests dynamic topic detection
+- unit tests for parsing, topic artifacts, graph/checkpoint contracts, temporal
+  recommendation metrics, statistics, vector-store manifests, and MCP schemas
+- no embedding generation
+- no model training
+- no artifact overwrite
 
-This command writes model artifacts into the mounted `models` folder.
+Use `scripts/train_pipeline.py` explicitly when you want to rebuild artifacts.
 
 ## Train The Model
 
@@ -91,6 +115,8 @@ docker compose run --rm metrogenn python scripts/train_pipeline.py
 Runs the training pipeline using values from `config.yaml`.
 This is heavier than `scripts/test_pipeline.py` because it uses the configured
 training settings, including the configured epoch count.
+Training is seeded by default with `--seed 42`; pass a different `--seed` only
+when you intentionally want a new checkpoint.
 
 Generated artifacts are written to the mounted `models` folder.
 
@@ -109,6 +135,51 @@ To write evaluation outputs to the project `saved_results` folder instead, omit
 ```powershell
 docker compose run --rm metrogenn python scripts/evaluate_model.py --device cpu
 ```
+
+## Evaluate Recommendation Baselines
+
+```powershell
+docker compose run --rm metrogenn python scripts/build_recommendation_benchmark.py
+```
+
+Builds the temporal citation benchmark configured by
+`configs/experiments/citation_temporal_v1.yaml`. With the bundled legacy
+metadata-only CSV, this writes a clearly labeled citation-proxy pilot benchmark
+for end-to-end smoke testing. Use a CSV with real reference lists for paper
+evidence.
+
+```powershell
+docker compose run --rm metrogenn python scripts/evaluate_recommenders.py --proposed seeded_ppr --baseline tfidf
+```
+
+Runs the configured baseline methods, writes per-query metrics and confidence
+intervals, and emits paper-ready report/table files under `saved_results`.
+
+## Evaluate MCP Agent Traces
+
+```powershell
+docker compose run --rm metrogenn python scripts/evaluate_mcp_agent_traces.py --traces /app/saved_results/agent_traces.jsonl
+```
+
+Scores a complete saved trace file against
+`agents/benchmarks/mcp_agent_tasks.jsonl`. Use `--allow-partial` only for
+debugging incomplete trace captures.
+
+## Profile Training And Serving
+
+```powershell
+docker compose run --rm metrogenn python scripts/profile_training.py --steps 20
+```
+
+Profiles target construction and warm training-step latency without overwriting
+checkpoints.
+
+```powershell
+docker compose run --rm metrogenn python scripts/profile_serving.py --runs 20 --query "graph neural networks"
+```
+
+Profiles artifact validation/loading, warm GNN forward latency, and optional
+end-to-end query latency.
 
 ## Health Checks Used During Validation
 
@@ -157,14 +228,14 @@ project data in `train`, `models`, and `saved_results` stays on the host.
 
 `docker-compose.yml` mounts these host paths:
 
-- `./config.yaml:/app/config.yaml:ro`
-- `./train:/app/train:ro`
+- `./:/app:ro`
 - `./models:/app/models`
 - `./saved_results:/app/saved_results`
 
-The `train` folder and `config.yaml` are read-only inside the container.
-The `models` and `saved_results` folders are writable so training and evaluation
-outputs persist on the host.
+The project source, `train` folder, and `config.yaml` are read-only inside the
+container. The `models` and `saved_results` folders are mounted back over that
+read-only project mount as writable paths so training and evaluation outputs
+persist on the host.
 
 ## Notes
 

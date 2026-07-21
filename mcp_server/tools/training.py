@@ -18,7 +18,11 @@ from gnn_pipeline.data.feature_engineering import create_all_features
 from gnn_pipeline.data.graph_builder import build_knowledge_graph_from_dblp
 from gnn_pipeline.data.parsing import build_author_index, save_author_mapping
 from gnn_pipeline.data.topic_assignment import EMBED_MODEL_NAME, prepare_topics
-from gnn_pipeline.data.validation import validate_knowledge_graph, validate_papers_dataframe
+from gnn_pipeline.data.validation import (
+    ensure_paper_identity_columns,
+    validate_knowledge_graph,
+    validate_papers_dataframe,
+)
 from gnn_pipeline.data.vector_store import PaperVectorStore
 from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
 from gnn_pipeline.models.training import set_external_data, train_enhanced_model
@@ -74,7 +78,7 @@ async def train_pipeline(
         )
 
     await ctx.report_progress(progress=0.0, total=1.0, message="Validating CSV...")
-    df = pd.read_csv(csv_path)
+    df = ensure_paper_identity_columns(pd.read_csv(csv_path))
     data_stats = validate_papers_dataframe(df)
     dataset_sha = sha256_file(csv_path)
 

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from gnn_pipeline.artifacts import validate_pipeline_manifest
 from gnn_pipeline.config import ensure_dirs, get_path, get_value
 from gnn_pipeline.data.parsing import build_author_index
+from gnn_pipeline.data.validation import ensure_paper_identity_columns
 from gnn_pipeline.evaluation import GNNEvaluator
 from gnn_pipeline.models.checkpoint import load_model_for_pipeline
 from gnn_pipeline.models.training import set_external_data
@@ -69,7 +70,16 @@ def load_split_indices():
     if os.path.isfile(splits_path):
         split_data = torch.load(splits_path, map_location="cpu", weights_only=False)
         print(f"Loaded split indices from {splits_path}")
-        return split_data["train_idx"], split_data["val_idx"]
+        train_idx = split_data["train_idx"]
+        val_idx = split_data["val_idx"]
+        test_idx = split_data.get("test_idx")
+        if test_idx is None:
+            print(
+                "Legacy split file has no held-out test split; using validation "
+                "indices for backward-compatible diagnostics."
+            )
+            test_idx = val_idx
+        return train_idx, val_idx, test_idx
     else:
         raise FileNotFoundError(
             f"Split indices not found at {splits_path}. "
@@ -81,7 +91,7 @@ def setup_external_data():
     csv_path = get_path("data", "csv_path")
     topic_json_path = get_path("data", "topic_json_path")
 
-    df = pd.read_csv(csv_path)
+    df = ensure_paper_identity_columns(pd.read_csv(csv_path))
 
     topic_info_dict = {}
     if topic_json_path and os.path.isfile(topic_json_path):
@@ -107,11 +117,11 @@ def run_evaluation(model, graph, device, save_dir):
 
     targets = evaluator._generate_targets_from_data(graph)
 
-    _, test_idx = load_split_indices()
+    _, val_idx, test_idx = load_split_indices()
 
     print(
-        f"\nUsing legacy validation split with {len(test_idx)} authors. "
-        "This split was used for checkpoint selection and is diagnostic only."
+        f"\nUsing validation split with {len(val_idx)} authors for checkpoint "
+        f"selection context and held-out diagnostic test split with {len(test_idx)} authors."
     )
 
     print("\n" + "=" * 70)
@@ -121,7 +131,7 @@ def run_evaluation(model, graph, device, save_dir):
     print(evaluator.generate_report(full_metrics))
 
     print("\n" + "=" * 70)
-    print("LEGACY VALIDATION SPLIT EVALUATION (30%)")
+    print("HELD-OUT DIAGNOSTIC TEST SPLIT EVALUATION")
     print("=" * 70)
     test_metrics = evaluator.evaluate_model_on_data(
         model, graph, targets=targets, split_idx=test_idx

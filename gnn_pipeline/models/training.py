@@ -4,8 +4,10 @@ import torch.optim as optim
 from sklearn.metrics import accuracy_score
 import pandas as pd
 import os
+import random
 
 from gnn_pipeline.models.checkpoint import load_checkpoint_payload, save_model_checkpoint
+from gnn_pipeline.data.time_utils import infer_observation_year
 
 
 try:
@@ -35,6 +37,20 @@ _external_df = None
 _external_author_to_idx = None
 
 
+def set_training_seed(seed: int = 42, *, deterministic: bool = True) -> None:
+    """Seed Python, NumPy, and PyTorch for reproducible artifact generation."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if deterministic and hasattr(torch, "use_deterministic_algorithms"):
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    if deterministic and hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+
+
 def set_external_data(df: pd.DataFrame, author_to_idx: dict):
     """
     REQUIRED: Set external data for valid importance prediction.
@@ -44,6 +60,43 @@ def set_external_data(df: pd.DataFrame, author_to_idx: dict):
     _external_df = df
     _external_author_to_idx = author_to_idx
     print(f"External data set: {len(df)} papers, {len(author_to_idx)} authors")
+
+
+def create_author_split_indices(
+    num_authors: int,
+    *,
+    seed: int = 42,
+    train_fraction: float = 0.70,
+    val_fraction: float = 0.15,
+):
+    """Create deterministic train/validation/test author splits.
+
+    Validation is used for scheduling and checkpoint selection. The test split is
+    held out from those choices and should only be used for diagnostic reporting.
+    """
+    if num_authors < 1:
+        raise ValueError("Cannot split an empty author set")
+    if train_fraction <= 0 or val_fraction < 0 or train_fraction + val_fraction >= 1:
+        raise ValueError("Split fractions must leave a positive test fraction")
+
+    generator = torch.Generator().manual_seed(seed)
+    indices = torch.randperm(num_authors, generator=generator)
+
+    if num_authors < 3:
+        n_train = 1
+        n_val = max(0, num_authors - n_train)
+    else:
+        n_train = max(1, int(num_authors * train_fraction))
+        n_val = max(1, int(num_authors * val_fraction))
+        if n_train + n_val >= num_authors:
+            n_val = max(1, num_authors - n_train - 1)
+        if n_train + n_val >= num_authors:
+            n_train = max(1, num_authors - n_val - 1)
+
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train : n_train + n_val]
+    test_idx = indices[n_train + n_val :]
+    return train_idx, val_idx, test_idx
 
 
 def create_enhanced_training_targets(data):
@@ -92,9 +145,11 @@ def create_enhanced_training_targets(data):
     # IMPORTANCE TARGETS (from paper citations - EXTERNAL)
     # ================================================================
     paper_citations = pd.to_numeric(df["n_citation"], errors="coerce").fillna(0).values
-    paper_years = pd.to_numeric(df["year"], errors="coerce").fillna(2025).values
 
-    current_year = 2025
+    current_year = infer_observation_year(df)
+    paper_years = (
+        pd.to_numeric(df["year"], errors="coerce").fillna(current_year).values
+    )
     citation_velocity = np.zeros(len(paper_citations))
     for i, year in enumerate(paper_years):
         age = max(1, int(current_year - year))
@@ -171,7 +226,7 @@ def create_enhanced_training_targets(data):
 
 
 def train_enhanced_model(
-    model, data, epochs=200, checkpoint_path=None, pipeline_id=None
+    model, data, epochs=200, checkpoint_path=None, pipeline_id=None, seed: int = 42
 ):
     """
     Train MetroGNN model with multi-task learning using EXTERNAL ground truth.
@@ -180,6 +235,7 @@ def train_enhanced_model(
     """
     if not pipeline_id:
         raise ValueError("A v2 pipeline_id is required for versioned model checkpoints")
+    set_training_seed(seed)
 
     if checkpoint_path is None and HAS_CONFIG:
         checkpoint_path = get_path("models", "best_model")
@@ -198,16 +254,27 @@ def train_enhanced_model(
     )
 
     num_researchers = len(importance_targets)
-    generator = torch.Generator().manual_seed(42)
-    indices = torch.randperm(num_researchers, generator=generator)
-    train_idx = indices[: int(0.7 * num_researchers)]
-    val_idx = indices[int(0.7 * num_researchers) :]
+    train_idx, val_idx, test_idx = create_author_split_indices(
+        num_researchers, seed=seed
+    )
 
     if HAS_CONFIG:
         try:
             splits_path = get_path("models", "splits_path")
             os.makedirs(os.path.dirname(splits_path), exist_ok=True)
-            torch.save({"train_idx": train_idx, "val_idx": val_idx}, splits_path)
+            torch.save(
+                {
+                    "split_schema_version": 2,
+                    "seed": seed,
+                    "train_fraction": 0.70,
+                    "val_fraction": 0.15,
+                    "test_fraction": 0.15,
+                    "train_idx": train_idx,
+                    "val_idx": val_idx,
+                    "test_idx": test_idx,
+                },
+                splits_path,
+            )
             print(f"Split indices saved to {splits_path}")
         except Exception as e:
             print(f"Warning: Could not save split indices: {e}")
@@ -228,7 +295,8 @@ def train_enhanced_model(
     grad_clip_value = 1.0
 
     print(
-        f"\nTraining on {len(train_idx)} researchers, validating on {len(val_idx)} researchers"
+        f"\nTraining on {len(train_idx)} researchers, validating on {len(val_idx)} "
+        f"researchers, holding out {len(test_idx)} diagnostic test researchers"
     )
     print(
         f"Class distribution - Importance: {torch.bincount(importance_targets).tolist()}"

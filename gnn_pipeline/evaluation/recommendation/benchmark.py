@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
@@ -13,11 +15,19 @@ import pandas as pd
 
 from gnn_pipeline.artifacts import sha256_file, write_json_atomic
 from gnn_pipeline.data.parsing import parse_list_field
-from gnn_pipeline.data.validation import validate_papers_dataframe
+from gnn_pipeline.data.validation import (
+    ensure_paper_identity_columns,
+    validate_papers_dataframe,
+)
 
 
 BENCHMARK_SCHEMA_VERSION = 1
 PAPER_TEXT_FIELDS = ("title", "abstract", "keywords", "venue")
+_TOKEN = re.compile(r"\b[a-zA-Z0-9][a-zA-Z0-9_-]+\b")
+
+
+def _tokens(text: str) -> set[str]:
+    return set(token.casefold() for token in _TOKEN.findall(str(text)))
 
 
 def _document(row: pd.Series, fields: Sequence[str]) -> str:
@@ -29,9 +39,84 @@ def _document(row: pd.Series, fields: Sequence[str]) -> str:
     return " ".join(parts)
 
 
+def _text_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column in frame.columns:
+        return frame[column].fillna("").astype(str)
+    return pd.Series([""] * len(frame), index=frame.index, dtype=str)
+
+
 def _canonical_hash(value: Mapping[str, Any]) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _legacy_proxy_edges(
+    papers: pd.DataFrame,
+    *,
+    split_by_year: Mapping[int, str],
+    max_qrels_per_query: int,
+) -> tuple[set[tuple[str, str, int, int]], set[tuple[str, str, int, int]]]:
+    """Create a clearly-labeled pilot benchmark for legacy metadata-only CSVs.
+
+    Some local DBLP extracts bundled with this project contain citation counts but
+    no per-paper reference lists. This proxy is deterministic and strictly
+    temporal, but it is not a substitute for real citation qrels.
+    """
+    if max_qrels_per_query <= 0:
+        raise ValueError("proxy_qrels_per_query must be positive")
+
+    rows = papers.sort_values(["year", "paper_id"]).to_dict("records")
+    if not rows:
+        return set(), set()
+
+    citation_values = pd.to_numeric(
+        papers.get("n_citation", pd.Series([0] * len(papers))), errors="coerce"
+    ).fillna(0)
+    citation_by_id = dict(zip(papers["paper_id"].astype(str), citation_values))
+    max_log_citations = max(
+        [math.log1p(max(float(value), 0.0)) for value in citation_values] or [1.0]
+    )
+    max_log_citations = max(max_log_citations, 1.0)
+    min_year = int(papers["year"].min())
+    max_year = int(papers["year"].max())
+    year_span = max(1, max_year - min_year)
+    terms_by_id = {
+        str(row.paper_id): _tokens(row.document)
+        for row in papers[["paper_id", "document"]].itertuples(index=False)
+    }
+
+    historical_edges: set[tuple[str, str, int, int]] = set()
+    strict_qrels: set[tuple[str, str, int, int]] = set()
+    for source in rows:
+        source_id = str(source["paper_id"])
+        source_year = int(source["year"])
+        prior = [row for row in rows if int(row["year"]) < source_year]
+        if not prior:
+            continue
+
+        query_terms = terms_by_id.get(source_id, set())
+        scored = []
+        for candidate in prior:
+            candidate_id = str(candidate["paper_id"])
+            candidate_year = int(candidate["year"])
+            candidate_terms = terms_by_id.get(candidate_id, set())
+            union = query_terms | candidate_terms
+            overlap = (len(query_terms & candidate_terms) / len(union)) if union else 0.0
+            citation_score = math.log1p(
+                max(float(citation_by_id.get(candidate_id, 0.0)), 0.0)
+            ) / max_log_citations
+            recency_score = (candidate_year - min_year) / year_span
+            score = overlap + 0.10 * citation_score + 0.05 * recency_score
+            scored.append((score, candidate_id, candidate_year))
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        for _, target_id, target_year in scored[:max_qrels_per_query]:
+            edge = (source_id, target_id, source_year, target_year)
+            historical_edges.add(edge)
+            if source_year in split_by_year:
+                strict_qrels.add(edge)
+
+    return historical_edges, strict_qrels
 
 
 @dataclass
@@ -189,9 +274,11 @@ def build_temporal_citation_benchmark(
     *,
     splits: Mapping[str, Sequence[int]],
     query_text_fields: Sequence[str] = ("title", "abstract", "keywords"),
+    allow_legacy_proxy_qrels: bool = False,
+    proxy_qrels_per_query: int = 3,
 ) -> TemporalCitationBenchmark:
     """Construct query/qrel tables from strictly prior internal citations."""
-    raw = pd.read_csv(csv_path)
+    raw = ensure_paper_identity_columns(pd.read_csv(csv_path))
     data_validation = validate_papers_dataframe(raw)
     raw = raw.reset_index(drop=True)
     raw["paper_id"] = raw["id"].astype(str)
@@ -201,10 +288,13 @@ def build_temporal_citation_benchmark(
         {
             "paper_id": raw["paper_id"],
             "year": raw["year_numeric"],
-            "title": raw["title"].fillna("").astype(str),
-            "abstract": raw["abstract"].fillna("").astype(str),
-            "keywords": raw["keywords"].fillna("").astype(str),
-            "venue": raw["venue"].fillna("").astype(str),
+            "title": _text_series(raw, "title"),
+            "abstract": _text_series(raw, "abstract"),
+            "keywords": _text_series(raw, "keywords"),
+            "venue": _text_series(raw, "venue"),
+            "n_citation": pd.to_numeric(
+                _text_series(raw, "n_citation"), errors="coerce"
+            ).fillna(0),
         }
     )
     papers = papers[papers["year"].notna()].copy()
@@ -232,11 +322,14 @@ def build_temporal_citation_benchmark(
     }
     historical_edges = set()
     strict_qrels = set()
+    reference_rows_with_values = 0
 
     for row in raw.itertuples(index=False):
         source_id = str(row.paper_id)
         source_year = row.year_numeric
         references = parse_list_field(row.references)
+        if references:
+            reference_rows_with_values += 1
         if not references and str(row.references).strip() not in {"", "[]", "nan", "None"}:
             anomaly_counts["malformed_reference_rows"] += 1
         for target_id in set(str(value) for value in references):
@@ -261,12 +354,27 @@ def build_temporal_citation_benchmark(
             if source_year in split_by_year:
                 strict_qrels.add((source_id, target_id, source_year, target_year))
 
+    relevance_source = "internal_citation"
+    used_legacy_proxy_qrels = False
+    if not strict_qrels:
+        if allow_legacy_proxy_qrels and reference_rows_with_values == 0:
+            historical_edges, strict_qrels = _legacy_proxy_edges(
+                papers,
+                split_by_year=split_by_year,
+                max_qrels_per_query=int(proxy_qrels_per_query),
+            )
+            relevance_source = "legacy_metadata_citation_proxy"
+            used_legacy_proxy_qrels = True
+            anomaly_counts["legacy_proxy_edges"] = len(historical_edges)
+        else:
+            raise ValueError("No strictly-prior internal citation qrels were found")
+
     qrels = pd.DataFrame(
         sorted(strict_qrels),
         columns=["query_id", "candidate_id", "query_year", "target_year"],
     )
     if qrels.empty:
-        raise ValueError("No strictly-prior internal citation qrels were found")
+        raise ValueError("No strictly-prior benchmark qrels were found")
     qrels["relevance"] = 1.0
     qrels["split"] = qrels["query_year"].map(split_by_year)
 
@@ -277,9 +385,9 @@ def build_temporal_citation_benchmark(
             "query_id": query_rows["paper_id"],
             "query_year": query_rows["year_numeric"].astype(int),
             "split": query_rows["year_numeric"].astype(int).map(split_by_year),
-            "title": query_rows["title"].fillna("").astype(str),
-            "abstract": query_rows["abstract"].fillna("").astype(str),
-            "keywords": query_rows["keywords"].fillna("").astype(str),
+            "title": _text_series(query_rows, "title"),
+            "abstract": _text_series(query_rows, "abstract"),
+            "keywords": _text_series(query_rows, "keywords"),
         }
     )
     queries["query_text"] = queries.apply(
@@ -297,8 +405,12 @@ def build_temporal_citation_benchmark(
         "dataset_sha256": sha256_file(csv_path),
         "splits": {key: [int(year) for year in years] for key, years in splits.items()},
         "candidate_policy": "strictly_earlier_year",
-        "relevance_source": "internal_citation",
+        "relevance_source": relevance_source,
         "query_text_fields": list(query_text_fields),
+        "legacy_proxy_qrels": used_legacy_proxy_qrels,
+        "proxy_qrels_per_query": int(proxy_qrels_per_query)
+        if used_legacy_proxy_qrels
+        else None,
         "benchmark_schema_version": BENCHMARK_SCHEMA_VERSION,
     }
     metadata = {
@@ -306,6 +418,7 @@ def build_temporal_citation_benchmark(
         "benchmark_id": _canonical_hash(identity),
         "source_csv": os.path.abspath(csv_path),
         "data_validation": data_validation,
+        "reference_rows_with_values": reference_rows_with_values,
         "anomalies": anomaly_counts,
         "counts": {
             "papers": len(papers),

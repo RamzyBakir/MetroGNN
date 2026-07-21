@@ -19,13 +19,22 @@ from gnn_pipeline.data.feature_engineering import create_all_features, print_fea
 from gnn_pipeline.data.graph_builder import build_knowledge_graph_from_dblp
 from gnn_pipeline.data.parsing import build_author_index, save_author_mapping
 from gnn_pipeline.data.topic_assignment import EMBED_MODEL_NAME, prepare_topics
-from gnn_pipeline.data.validation import validate_knowledge_graph, validate_papers_dataframe
+from gnn_pipeline.data.validation import (
+    ensure_paper_identity_columns,
+    validate_knowledge_graph,
+    validate_papers_dataframe,
+)
 from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
-from gnn_pipeline.models.training import set_external_data, train_enhanced_model
+from gnn_pipeline.models.training import (
+    set_external_data,
+    set_training_seed,
+    train_enhanced_model,
+)
 
 
-def build_and_train(force_topics: bool = False):
+def build_and_train(force_topics: bool = False, seed: int = 42):
     ensure_dirs()
+    set_training_seed(seed)
 
     csv_path = get_path("data", "csv_path")
     topic_info_path = get_path("data", "topic_json_path")
@@ -37,7 +46,7 @@ def build_and_train(force_topics: bool = False):
     manifest_path = get_path("models", "pipeline_manifest")
 
     print("1. Loading and validating papers...")
-    df = pd.read_csv(csv_path)
+    df = ensure_paper_identity_columns(pd.read_csv(csv_path))
     data_stats = validate_papers_dataframe(df)
     dataset_sha256 = sha256_file(csv_path)
     print(f"Dataset: {data_stats}")
@@ -118,6 +127,7 @@ def build_and_train(force_topics: bool = False):
         epochs=get_value("training", "epochs"),
         checkpoint_path=model_path,
         pipeline_id=manifest["pipeline_id"],
+        seed=seed,
     )
     update_manifest_model(manifest_path, model_path, trained_model.get_config())
 
@@ -134,5 +144,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Explicitly regenerate topic assignments and centroids",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducible training",
+    )
     args = parser.parse_args()
-    build_and_train(force_topics=args.force_topics)
+    build_and_train(force_topics=args.force_topics, seed=args.seed)

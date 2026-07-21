@@ -19,6 +19,28 @@ REQUIRED_PAPER_COLUMNS = {
     "venue",
 }
 
+LEGACY_SYNTHETIC_ID_PREFIX = "legacy-row:"
+
+
+def ensure_paper_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with v2 identity/reference columns for legacy local CSVs.
+
+    Older local DBLP extracts contain paper metadata but no stable paper IDs or
+    reference lists. The v2 graph/vector code needs those columns for artifact
+    alignment, so we synthesize deterministic row IDs and empty references in
+    memory without modifying the source CSV.
+    """
+    result = df.copy()
+    if "id" not in result.columns:
+        result.insert(
+            0,
+            "id",
+            [f"{LEGACY_SYNTHETIC_ID_PREFIX}{idx}" for idx in range(len(result))],
+        )
+    if "references" not in result.columns:
+        result["references"] = "[]"
+    return result
+
 
 def validate_papers_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
     missing = REQUIRED_PAPER_COLUMNS - set(df.columns)

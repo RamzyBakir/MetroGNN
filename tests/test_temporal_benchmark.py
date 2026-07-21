@@ -2,8 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gnn_pipeline.evaluation.recommendation.benchmark import TemporalCitationBenchmark
-from tests.recommendation_fixture import build_fixture
+import pandas as pd
+
+from gnn_pipeline.evaluation.recommendation.benchmark import (
+    TemporalCitationBenchmark,
+    build_temporal_citation_benchmark,
+)
+from tests.recommendation_fixture import build_fixture, write_papers
 
 
 class TemporalBenchmarkTests(unittest.TestCase):
@@ -57,6 +62,54 @@ class TemporalBenchmarkTests(unittest.TestCase):
             (output / manifest["files"]["qrels"]).write_text("corrupt")
             with self.assertRaisesRegex(ValueError, "checksum"):
                 TemporalCitationBenchmark.load(str(output))
+
+    def test_optional_abstract_column_can_be_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = write_papers(root / "papers.csv")
+            frame = pd.read_csv(csv_path).drop(columns=["abstract"])
+            frame.to_csv(csv_path, index=False)
+
+            benchmark = build_temporal_citation_benchmark(
+                str(csv_path),
+                splits={"train": [2021, 2022], "validation": [2023], "test": [2024]},
+                query_text_fields=["title", "abstract", "keywords"],
+            )
+            self.assertEqual(benchmark.validate()["queries"], 4)
+
+    def test_legacy_proxy_qrels_require_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = write_papers(root / "papers.csv")
+            frame = pd.read_csv(csv_path).drop(columns=["references"])
+            frame.to_csv(csv_path, index=False)
+
+            splits = {"train": [2021, 2022], "validation": [2023], "test": [2024]}
+            with self.assertRaisesRegex(ValueError, "No strictly-prior internal"):
+                build_temporal_citation_benchmark(
+                    str(csv_path),
+                    splits=splits,
+                    query_text_fields=["title", "abstract", "keywords"],
+                )
+
+            benchmark = build_temporal_citation_benchmark(
+                str(csv_path),
+                splits=splits,
+                query_text_fields=["title", "abstract", "keywords"],
+                allow_legacy_proxy_qrels=True,
+                proxy_qrels_per_query=2,
+            )
+            self.assertEqual(
+                benchmark.metadata["relevance_source"],
+                "legacy_metadata_citation_proxy",
+            )
+            self.assertTrue(benchmark.metadata["legacy_proxy_qrels"])
+            self.assertGreater(len(benchmark.qrels), 0)
+            self.assertTrue(
+                (benchmark.qrels["target_year"] < benchmark.qrels["query_year"]).all()
+            )
+            self.assertEqual(set(benchmark.queries["query_year"]), {2021, 2022, 2023, 2024})
+            self.assertEqual(benchmark.validate()["queries"], len(benchmark.queries))
 
 
 if __name__ == "__main__":

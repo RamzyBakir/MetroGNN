@@ -10,7 +10,11 @@ from torch_geometric.utils import scatter
 
 from gnn_pipeline.config import get_path
 from gnn_pipeline.utils.visualization import plot_training_history
-from gnn_pipeline.models.training import set_external_data
+from gnn_pipeline.models.training import (
+    create_author_split_indices,
+    set_external_data,
+    set_training_seed,
+)
 from gnn_pipeline.models.checkpoint import load_checkpoint_payload, save_model_checkpoint
 
 
@@ -30,6 +34,7 @@ def train_enhanced_model_gpu(
     use_amp=True,
     checkpoint_path=None,
     pipeline_id=None,
+    seed=42,
 ):
     """
     GPU-optimized training with mixed precision and mini-batch support.
@@ -51,6 +56,7 @@ def train_enhanced_model_gpu(
 
     if not pipeline_id:
         raise ValueError("A v2 pipeline_id is required for versioned model checkpoints")
+    set_training_seed(seed)
     if checkpoint_path is None:
         checkpoint_path = get_path("models", "best_model_gpu")
 
@@ -67,15 +73,26 @@ def train_enhanced_model_gpu(
     )
 
     num_researchers = len(importance_targets)
-    generator = torch.Generator().manual_seed(42)
-    indices = torch.randperm(num_researchers, generator=generator)
-    train_idx = indices[: int(0.7 * num_researchers)]
-    val_idx = indices[int(0.7 * num_researchers) :]
+    train_idx, val_idx, test_idx = create_author_split_indices(
+        num_researchers, seed=seed
+    )
 
     try:
         splits_path = get_path("models", "splits_path")
         os.makedirs(os.path.dirname(splits_path), exist_ok=True)
-        torch.save({"train_idx": train_idx, "val_idx": val_idx}, splits_path)
+        torch.save(
+            {
+                "split_schema_version": 2,
+                "seed": seed,
+                "train_fraction": 0.70,
+                "val_fraction": 0.15,
+                "test_fraction": 0.15,
+                "train_idx": train_idx,
+                "val_idx": val_idx,
+                "test_idx": test_idx,
+            },
+            splits_path,
+        )
         print(f"Split indices saved to {splits_path}")
     except Exception as e:
         print(f"Warning: Could not save split indices: {e}")
@@ -97,7 +114,8 @@ def train_enhanced_model_gpu(
     patience = 50
 
     print(
-        f"Training on {len(train_idx)} researchers, validating on {len(val_idx)} researchers"
+        f"Training on {len(train_idx)} researchers, validating on {len(val_idx)} "
+        f"researchers, holding out {len(test_idx)} diagnostic test researchers"
     )
     print(
         f"Class distribution - Importance: {torch.bincount(importance_targets).tolist()}"

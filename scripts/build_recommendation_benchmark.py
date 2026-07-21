@@ -34,6 +34,10 @@ def main():
         resolve(benchmark_config["csv_path"]),
         splits=benchmark_config["splits"],
         query_text_fields=benchmark_config["query_text_fields"],
+        allow_legacy_proxy_qrels=bool(
+            benchmark_config.get("allow_legacy_proxy_qrels", False)
+        ),
+        proxy_qrels_per_query=int(benchmark_config.get("proxy_qrels_per_query", 3)),
     )
     output_dir = resolve(args.output_dir or benchmark_config["output_dir"])
     manifest = benchmark.save(output_dir)

@@ -13,7 +13,8 @@ __pycache__/
 .spinospace
 *.zip
 
-# Runtime data is mounted by docker-compose.yml.
-train/
+# Runtime artifacts are mounted by docker-compose.yml.
+train/*
+!train/DBLP-Citation-network-V18-1-20-25_clean.csv
 models/
 saved_results/

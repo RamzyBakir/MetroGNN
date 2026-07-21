@@ -3,6 +3,8 @@ import numpy as np
 from typing import Dict, Tuple, List
 import json
 
+from gnn_pipeline.data.time_utils import infer_observation_year
+
 
 def create_paper_features(
     df: pd.DataFrame, topic_info_dict: Dict, tfidf_vectors: np.ndarray = None
@@ -12,7 +14,7 @@ def create_paper_features(
 
     Features (6 dims + 2 reserved):
     0. n_citation: Citation count from dataset
-    1. recency: 2025 - year (more recent = higher)
+    1. recency: normalized age from the dataset's latest observed year
     2. author_count: Number of authors
     3. title_length: Character count of title
     4. topic_relevance: Max TF-IDF score for paper's topic
@@ -33,8 +35,8 @@ def create_paper_features(
     n_citation = pd.to_numeric(df["n_citation"], errors="coerce").fillna(0)
     paper_features[:, 0] = n_citation.values.astype(np.float32)
 
-    # Feature 1: recency (2025 - year, normalized)
-    current_year = 2025
+    # Feature 1: recency from the dataset observation horizon.
+    current_year = infer_observation_year(df)
     max_age = 10  # Assume papers older than 10 years get max penalty
     years = pd.to_numeric(df["year"], errors="coerce").fillna(current_year - max_age)
     recency = (current_year - years.values).astype(np.float32)
@@ -190,13 +192,15 @@ def create_all_features(
     # Create topic features
     topic_features = create_topic_features(topic_info_dict)
 
+    observation_year = infer_observation_year(df)
+
     # Create feature descriptions
     feature_info = {
         "paper_features": {
             "dims": paper_features.shape[1],
             "description": [
                 "n_citation: Citation count",
-                "recency: 1 - (2025 - year) / 10 (normalized)",
+                f"recency: 1 - ({observation_year} - year) / 10 (normalized)",
                 "author_count: Number of authors",
                 "title_length: Title length / 200 (normalized)",
                 "topic_relevance: Max TF-IDF score",
@@ -226,6 +230,7 @@ def create_all_features(
             "num_papers": paper_features.shape[0],
             "num_authors": author_features.shape[0],
             "num_topics": topic_features.shape[0],
+            "observation_year": observation_year,
         },
     }
 

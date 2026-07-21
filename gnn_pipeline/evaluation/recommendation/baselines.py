@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 from collections import Counter
 from typing import Dict, List, Sequence, Tuple
@@ -17,6 +18,10 @@ from .interfaces import RankedItem, Recommender
 
 
 _TOKEN = re.compile(r"\b[a-zA-Z0-9][a-zA-Z0-9_-]+\b")
+
+
+def _show_progress_bars() -> bool:
+    return os.environ.get("TQDM_DISABLE", "").lower() not in {"1", "true", "yes"}
 
 
 def tokenize(text: str) -> List[str]:
@@ -210,7 +215,7 @@ class SentenceEmbeddingRecommender(Recommender):
             embeddings = self.model.encode(
                 self._candidate_texts(candidates),
                 batch_size=256,
-                show_progress_bar=True,
+                show_progress_bar=_show_progress_bars(),
                 normalize_embeddings=True,
             )
             self._cache[query_year] = (

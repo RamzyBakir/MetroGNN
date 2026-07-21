@@ -3,10 +3,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gnn_pipeline.config import ensure_dirs, get_path
+from gnn_pipeline.config import ensure_dirs
 from gnn_pipeline.inference import print_results, run_inference
+from scripts.bootstrap_artifacts import ensure_runtime_artifacts
 
 ensure_dirs()
+ensure_runtime_artifacts()
 
 result = run_inference(
     query="AI agents",

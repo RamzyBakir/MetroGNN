@@ -1,0 +1,52 @@
+experiment:
+  name: citation_temporal_v1
+  random_seeds: [13, 42, 77, 101, 202]
+
+benchmark:
+  csv_path: train/DBLP-Citation-network-V18-1-20-25_clean.csv
+  output_dir: saved_results/benchmarks/citation_temporal_v1
+  splits:
+    train: [2021, 2022]
+    validation: [2023]
+    test: [2024]
+  query_text_fields: [title, abstract, keywords, venue]
+  allow_legacy_proxy_qrels: true
+  proxy_qrels_per_query: 3
+
+ranking:
+  max_k: 20
+  metrics:
+    recall: [5, 10, 20]
+    ndcg: [5, 10, 20]
+    mrr: [10, 20]
+    map: [10, 20]
+
+baselines:
+  enabled:
+    - random
+    - popularity
+    - recency
+    - tfidf
+    - bm25
+    - seeded_ppr
+  tfidf:
+    max_features: 50000
+    ngram_range: [1, 2]
+  bm25:
+    k1: 1.5
+    b: 0.75
+  seeded_ppr:
+    semantic_seed_count: 20
+    alpha: 0.85
+  neural:
+    enabled: false
+    models:
+      minilm: sentence-transformers/all-MiniLM-L6-v2
+      scholarly: allenai/specter2_base
+
+statistics:
+  primary_metrics: [ndcg@10, recall@20]
+  bootstrap_resamples: 10000
+  permutation_resamples: 10000
+  confidence_level: 0.95
+  correction: holm

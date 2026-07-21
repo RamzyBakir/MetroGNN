@@ -24,6 +24,10 @@ from sklearn.metrics import silhouette_score
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
+def _show_progress_bars() -> bool:
+    return os.environ.get("TQDM_DISABLE", "").lower() not in {"1", "true", "yes"}
+
+
 class TopicAssigner:
     """Assign papers to topics using sentence-embedding K-Means clustering."""
 
@@ -208,7 +212,7 @@ class TopicAssigner:
 
         # 2. Encode
         embeddings = self.embed_model.encode(
-            documents, show_progress_bar=True, batch_size=batch_size
+            documents, show_progress_bar=_show_progress_bars(), batch_size=batch_size
         )
 
         # 3. Optionally pick best k

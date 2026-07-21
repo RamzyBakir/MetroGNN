@@ -8,7 +8,9 @@ from gnn_pipeline.artifacts import GRAPH_SCHEMA_VERSION
 from gnn_pipeline.data.parsing import parse_list_field
 
 
-def create_meaningful_node_features(num_researchers=20, num_papers=30, num_topics=8):
+def create_meaningful_node_features(
+    num_researchers=20, num_papers=30, num_topics=8, observation_year=2026
+):
 
     researcher_features = []
     for i in range(num_researchers):
@@ -35,7 +37,7 @@ def create_meaningful_node_features(num_researchers=20, num_papers=30, num_topic
     for i in range(num_papers):
         citation_count = np.random.poisson(10)
         topic_relevance = np.random.uniform(0.5, 1.0)
-        recency = 2025 - np.random.uniform(2010, 2025)
+        recency = observation_year - np.random.uniform(2010, observation_year)
         author_count = np.random.poisson(3) + 1
 
         paper_features.append(

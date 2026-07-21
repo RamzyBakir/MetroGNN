@@ -12,6 +12,7 @@ Usage:
 
 import os
 import ast
+import gc
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -25,11 +26,16 @@ from gnn_pipeline.artifacts import (
     sha256_file,
     write_json_atomic,
 )
+from gnn_pipeline.data.validation import ensure_paper_identity_columns
 
 
 COLLECTION_NAME = "dblp_papers"
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_PERSIST_DIR = "models/vector_store_semantic_v2"
+
+
+def _show_progress_bars() -> bool:
+    return os.environ.get("TQDM_DISABLE", "").lower() not in {"1", "true", "yes"}
 
 
 class PaperVectorStore:
@@ -52,6 +58,20 @@ class PaperVectorStore:
         self._collection: Optional[chromadb.Collection] = None
         self._embed_model: Optional[SentenceTransformer] = None
         self._validated_signature = None
+
+    def close(self) -> None:
+        """Release Chroma resources so persistent files can be removed on Windows."""
+        if self._client is not None and hasattr(self._client, "close"):
+            self._client.close()
+        self._collection = None
+        self._client = None
+        gc.collect()
+
+    def __enter__(self) -> "PaperVectorStore":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
 
     # ------------------------------------------------------------------
     # Properties (lazy init)
@@ -135,10 +155,14 @@ class PaperVectorStore:
 
         if force_reingest:
             # Drop and recreate
-            self.client.delete_collection(COLLECTION_NAME)
+            try:
+                self.client.delete_collection(COLLECTION_NAME)
+            except Exception as exc:
+                if exc.__class__.__name__ != "NotFoundError":
+                    raise
             self._collection = None  # force re-creation via property
 
-        df = pd.read_csv(csv_path)
+        df = ensure_paper_identity_columns(pd.read_csv(csv_path))
         if topic_assignments_path:
             assignments = pd.read_csv(topic_assignments_path, dtype={"paper_id": str})
             if len(assignments) != len(df) or assignments["paper_id"].tolist() != df["id"].astype(str).tolist():
@@ -182,7 +206,7 @@ class PaperVectorStore:
         # Embed in batches
         print("Encoding documents with SentenceTransformer ...")
         all_embeddings = self.embed_model.encode(
-            documents, show_progress_bar=True, batch_size=batch_size
+            documents, show_progress_bar=_show_progress_bars(), batch_size=batch_size
         )
 
         # Upsert into ChromaDB in chunks (ChromaDB limit per call)
