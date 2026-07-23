@@ -407,6 +407,10 @@ class GNNEvaluator:
         # Generate targets if not provided
         if targets is None:
             targets = self._generate_targets_from_data(data)
+        targets = {
+            name: target.to(self.device) if isinstance(target, torch.Tensor) else target
+            for name, target in targets.items()
+        }
 
         with torch.no_grad():
             # Forward pass
