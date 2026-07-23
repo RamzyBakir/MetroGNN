@@ -103,27 +103,36 @@ def visualize_embeddings(embeddings, labels=None, title="Embedding Visualization
     plt.show()
 
 
-def visualize_community_network(community_data, filename=None):
+def visualize_community_network(community_data, filename=None, collaboration_edges=None):
 
     import networkx as nx
 
+    key_members = community_data.get('key_members', [])
+    other_members = community_data.get('other_members', [])
+    key_ids = {member['id'] for member in key_members}
+    members = {member['id']: member for member in key_members + other_members}
+
     G = nx.Graph()
+    for member_id, member in members.items():
+        G.add_node(member_id,
+                   influence=member.get('global_influence', 0.5),
+                   role=member.get('role', 'Contributor'),
+                   importance=member.get('importance', 'Medium'),
+                   is_key=member_id in key_ids)
 
+    # Edges come from the real author collaboration graph; only links between
+    # members of this community are drawn.
+    if collaboration_edges is not None and len(collaboration_edges):
+        idx_to_id = {int(member_id[1:]): member_id for member_id in members}
+        for src, dst in zip(collaboration_edges[0], collaboration_edges[1]):
+            src_id = idx_to_id.get(int(src))
+            dst_id = idx_to_id.get(int(dst))
+            if src_id is not None and dst_id is not None and src_id != dst_id:
+                G.add_edge(src_id, dst_id)
 
-    for member in community_data['key_members']:
-        researcher_id = member['id']
-        G.add_node(researcher_id,
-                   influence=member['global_influence'],
-                   role=member['role'],
-                   importance=member.get('importance', 'Medium'))
-
-
-    nodes = list(G.nodes())
-    for i in range(len(nodes)):
-        for j in range(i + 1, min(i + 3, len(nodes))):
-            if np.random.random() > 0.5:
-                G.add_edge(nodes[i], nodes[j])
-
+    if G.number_of_nodes() == 0:
+        print("No community members to visualize")
+        return
 
     plt.figure(figsize=(12, 10))
 
@@ -137,22 +146,23 @@ def visualize_community_network(community_data, filename=None):
 
     node_colors = []
     node_sizes = []
+    edge_colors = []
     for node in G.nodes():
-        role = G.nodes[node]['role']
-        influence = G.nodes[node]['influence']
-        node_colors.append(role_colors.get(role, 'gray'))
-        node_sizes.append(100 + influence * 500)
-
+        attrs = G.nodes[node]
+        node_colors.append(role_colors.get(attrs['role'], 'gray'))
+        node_sizes.append(100 + attrs['influence'] * 500)
+        edge_colors.append('black' if attrs['is_key'] else 'none')
 
     pos = nx.spring_layout(G, seed=42)
 
-
-    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, alpha=0.8)
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes,
+                           alpha=0.8, edgecolors=edge_colors, linewidths=1.5)
     nx.draw_networkx_edges(G, pos, alpha=0.3, width=1)
-    nx.draw_networkx_labels(G, pos, font_size=10)
-
+    labels = {node: node for node in G.nodes() if G.nodes[node]['is_key']}
+    nx.draw_networkx_labels(G, pos, labels=labels, font_size=10)
 
     legend_patches = [Patch(color=color, label=role) for role, color in role_colors.items()]
+    legend_patches.append(Patch(facecolor='white', edgecolor='black', label='Key member'))
     plt.legend(handles=legend_patches, loc='upper right')
 
     plt.title(f"Community Network: {community_data.get('community_name', 'Unknown')}")
