@@ -1,0 +1,38 @@
+services:
+  metrognn:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: metrognn:gpu
+    container_name: metrognn-gpu
+    init: true
+    working_dir: /app
+    gpus: all
+    environment:
+      PYTHONPYCACHEPREFIX: /tmp/pycache
+      PYTHONUNBUFFERED: "1"
+      MPLBACKEND: Agg
+      MPLCONFIGDIR: /cache/matplotlib
+      HF_HOME: /cache/huggingface
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      TRANSFORMERS_CACHE: /cache/huggingface
+      TRANSFORMERS_OFFLINE: "1"
+      TRANSFORMERS_VERBOSITY: error
+      TORCH_HOME: /cache/torch
+      TQDM_DISABLE: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      TOKENIZERS_PARALLELISM: "false"
+      PYTEST_ADDOPTS: "-p no:cacheprovider"
+      METROGNN_DEVICE: auto
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./:/app:ro
+      - ./models:/app/models
+      - ./saved_results:/app/saved_results
+    command: ["/bin/sh", "-lc", "${METROGNN_COMMAND:-python scripts/run_inference.py}"]

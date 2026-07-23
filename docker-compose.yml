@@ -1,9 +1,9 @@
 services:
-  metrogenn:
+  metrognn:
     build:
       context: .
-    image: metrogenn:local
-    container_name: metrogenn
+    image: metrognn:local
+    container_name: metrognn
     init: true
     working_dir: /app
     environment:

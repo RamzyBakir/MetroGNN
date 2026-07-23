@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -42,6 +43,7 @@ def ensure_runtime_artifacts(
     force_train: bool = False,
     force_vector: bool = False,
     seed: int = 42,
+    device: str | None = None,
 ) -> dict:
     """Ensure graph/model/topic/vector artifacts exist and match config.yaml."""
     ensure_dirs()
@@ -63,7 +65,7 @@ def ensure_runtime_artifacts(
         print("Building graph, topics, manifest, splits, and GNN checkpoint ...")
         from scripts.train_pipeline import build_and_train
 
-        _, _, manifest = build_and_train(force_topics=True, seed=seed)
+        _, _, manifest = build_and_train(force_topics=True, seed=seed, device=device)
         manifest = _validate_pipeline_artifacts()
 
     vector_manifest = None
@@ -97,12 +99,22 @@ def main() -> int:
     parser.add_argument("--force-train", action="store_true")
     parser.add_argument("--force-vector", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
-    ensure_runtime_artifacts(
-        force_train=args.force_train,
-        force_vector=args.force_vector,
-        seed=args.seed,
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default=os.environ.get("METROGNN_DEVICE", "auto"),
+        help="Training device used if artifacts need to be regenerated.",
     )
+    args = parser.parse_args()
+    try:
+        ensure_runtime_artifacts(
+            force_train=args.force_train,
+            force_vector=args.force_vector,
+            seed=args.seed,
+            device=args.device,
+        )
+    except RuntimeError as exc:
+        raise SystemExit(f"Error: {exc}") from None
     return 0
 
 

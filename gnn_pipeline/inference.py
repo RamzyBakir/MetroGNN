@@ -36,11 +36,13 @@ class GNNInferencer:
         graph_path: Optional[str] = None,
         papers_csv: Optional[str] = None,
         vector_store_dir: Optional[str] = None,
+        device: Optional[str] = None,
     ):
         self.model_path = model_path or get_path("models", "best_model_new")
         self.graph_path = graph_path or get_path("models", "knowledge_graph")
         self.papers_csv = papers_csv or get_path("data", "csv_path")
         self.vector_store_dir = vector_store_dir or get_path("models", "vector_store")
+        self.device = self._resolve_device(device)
         self.manifest_path = get_path("models", "pipeline_manifest")
         self.author_mapping_path = get_path("models", "author_mapping")
         self.vector_manifest_path = get_path("models", "vector_store_manifest")
@@ -61,13 +63,25 @@ class GNNInferencer:
         self._author_records: Optional[Dict[int, Dict]] = None
         self._topic_names: Optional[Dict[int, str]] = None
 
+    @staticmethod
+    def _resolve_device(device: Optional[str] = None) -> torch.device:
+        requested = (device or os.environ.get("METROGNN_DEVICE", "auto")).lower()
+        if requested == "auto":
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if requested.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA was requested, but PyTorch cannot see a GPU. "
+                "Use --device cpu or run with the GPU Docker Compose file."
+            )
+        return torch.device(requested)
+
     # ── Lazy loaders ────────────────────────────────────────────────────
 
     @property
     def model(self) -> AdvancedHeteroGCN:
         if self._model is None:
             self._model, _ = load_model_for_pipeline(
-                self.model_path, self.manifest_path, map_location="cpu"
+                self.model_path, self.manifest_path, map_location=self.device
             )
         return self._model
 
@@ -75,7 +89,7 @@ class GNNInferencer:
     def graph(self):
         if self._graph is None:
             self._graph = torch.load(
-                self.graph_path, map_location="cpu", weights_only=False
+                self.graph_path, map_location=self.device, weights_only=False
             )
             if getattr(self._graph, "pipeline_schema_version", None) != 2:
                 raise RuntimeError("Knowledge graph is not a v2 graph")
@@ -137,15 +151,19 @@ class GNNInferencer:
         num_authors = author_emb.shape[0] if author_emb is not None else 0
 
         imp_cls = (
-            importance_logits.argmax(dim=1).numpy()
+            importance_logits.argmax(dim=1).detach().cpu().numpy()
             if importance_logits is not None
             else None
         )
         role_cls = (
-            role_logits.argmax(dim=1).numpy() if role_logits is not None else None
+            role_logits.argmax(dim=1).detach().cpu().numpy()
+            if role_logits is not None
+            else None
         )
         inf_vals = (
-            influence_scores.squeeze().numpy() if influence_scores is not None else None
+            influence_scores.squeeze().detach().cpu().numpy()
+            if influence_scores is not None
+            else None
         )
 
         author_features = (
@@ -226,12 +244,13 @@ def run_inference(
     top_papers: int = 20,
     retrieval_k: int = 100,
     sort_by: str = "influence",
+    device: Optional[str] = None,
 ) -> Dict:
     """
     End-to-end pipeline:
         Query → Embed → Vector DB Top-K → GNN Lookup → Ranked Results
     """
-    inferencer = GNNInferencer()
+    inferencer = GNNInferencer(device=device)
 
     # 1. Semantic retrieval
     retrieval = inferencer.vector_store.query(
@@ -452,19 +471,30 @@ def main():
     parser.add_argument(
         "--output", "-o", type=str, default=None, help="Optional JSON output path"
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["auto", "cpu", "cuda"],
+        default=os.environ.get("METROGNN_DEVICE", "auto"),
+        help="Inference device. auto uses CUDA when PyTorch can see a GPU.",
+    )
 
     args = parser.parse_args()
     interests = [i.strip() for i in args.interests.split(",") if i.strip()]
 
-    result = run_inference(
-        query=args.query,
-        experience_level=args.experience,
-        interests=interests or None,
-        goals=args.goals,
-        top_papers=args.top,
-        retrieval_k=args.retrieval_k,
-        sort_by=args.sort,
-    )
+    try:
+        result = run_inference(
+            query=args.query,
+            experience_level=args.experience,
+            interests=interests or None,
+            goals=args.goals,
+            top_papers=args.top,
+            retrieval_k=args.retrieval_k,
+            sort_by=args.sort,
+            device=args.device,
+        )
+    except RuntimeError as exc:
+        raise SystemExit(f"Error: {exc}") from None
 
     print_results(result)
 

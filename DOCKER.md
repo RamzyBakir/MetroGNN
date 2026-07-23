@@ -12,7 +12,7 @@
 docker compose build
 ```
 
-Builds the local image named `metrogenn:local` using `Dockerfile`.
+Builds the local image named `metrognn:local` using `Dockerfile`.
 This installs dependencies and downloads the default SentenceTransformer model
 into the image cache.
 
@@ -29,7 +29,7 @@ useful when you want to prove the image can be rebuilt from scratch.
 
 ```powershell
 docker compose build
-docker compose run --rm metrogenn
+docker compose run --rm metrognn
 ```
 
 The default run first validates the configured CSV, graph/model/topic artifacts,
@@ -46,13 +46,13 @@ train/DBLP-Citation-network-V18-1-20-25_clean.csv
 You can run the bootstrap step explicitly with:
 
 ```powershell
-docker compose run --rm metrogenn python scripts/bootstrap_artifacts.py
+docker compose run --rm metrognn python scripts/bootstrap_artifacts.py
 ```
 
 ## Run Default Inference
 
 ```powershell
-docker compose run --rm metrogenn
+docker compose run --rm metrognn
 ```
 
 Runs the default command from `docker-compose.yml`, which validates or creates
@@ -68,7 +68,7 @@ vector store, and inference path work.
 ## Run A Custom Query
 
 ```powershell
-docker compose run --rm metrogenn python -m gnn_pipeline.inference -q "graph neural networks" -t 3 -k 10 --output /tmp/inference.json
+docker compose run --rm metrognn python -m gnn_pipeline.inference -q "graph neural networks" -t 3 -k 10 --output /tmp/inference.json
 ```
 
 Runs the inference CLI directly.
@@ -83,7 +83,7 @@ removed when `--rm` deletes the container. To keep the JSON output on your host
 machine, write it to the mounted `saved_results` folder instead:
 
 ```powershell
-docker compose run --rm metrogenn python -m gnn_pipeline.inference -q "graph neural networks" -t 3 -k 10 --output /app/saved_results/inference.json
+docker compose run --rm metrognn python -m gnn_pipeline.inference -q "graph neural networks" -t 3 -k 10 --output /app/saved_results/inference.json
 ```
 
 This creates `saved_results/inference.json` in the project folder on your
@@ -93,7 +93,7 @@ machine. The container path `/app/saved_results` is mapped to the local
 ## Run The Lightweight Validation Suite
 
 ```powershell
-docker compose run --rm metrogenn python scripts/test_pipeline.py
+docker compose run --rm metrognn python scripts/test_pipeline.py
 ```
 
 Runs the non-mutating validation suite:
@@ -109,7 +109,7 @@ Use `scripts/train_pipeline.py` explicitly when you want to rebuild artifacts.
 ## Train The Model
 
 ```powershell
-docker compose run --rm metrogenn python scripts/train_pipeline.py
+docker compose run --rm metrognn python scripts/train_pipeline.py
 ```
 
 Runs the training pipeline using values from `config.yaml`.
@@ -123,23 +123,23 @@ Generated artifacts are written to the mounted `models` folder.
 ## Evaluate The Model
 
 ```powershell
-docker compose run --rm metrogenn python scripts/evaluate_model.py --device cpu --save-dir /tmp/metrogenn_eval
+docker compose run --rm metrognn python scripts/evaluate_model.py --device cpu --save-dir /tmp/metrognn_eval
 ```
 
 Runs model evaluation on CPU and writes reports inside the container at
-`/tmp/metrogenn_eval`.
+`/tmp/metrognn_eval`.
 
 To write evaluation outputs to the project `saved_results` folder instead, omit
 `--save-dir`:
 
 ```powershell
-docker compose run --rm metrogenn python scripts/evaluate_model.py --device cpu
+docker compose run --rm metrognn python scripts/evaluate_model.py --device cpu
 ```
 
 ## Evaluate Recommendation Baselines
 
 ```powershell
-docker compose run --rm metrogenn python scripts/build_recommendation_benchmark.py
+docker compose run --rm metrognn python scripts/build_recommendation_benchmark.py
 ```
 
 Builds the temporal citation benchmark configured by
@@ -149,7 +149,7 @@ for end-to-end smoke testing. Use a CSV with real reference lists for paper
 evidence.
 
 ```powershell
-docker compose run --rm metrogenn python scripts/evaluate_recommenders.py --proposed seeded_ppr --baseline tfidf
+docker compose run --rm metrognn python scripts/evaluate_recommenders.py --proposed seeded_ppr --baseline tfidf
 ```
 
 Runs the configured baseline methods, writes per-query metrics and confidence
@@ -158,7 +158,7 @@ intervals, and emits paper-ready report/table files under `saved_results`.
 ## Evaluate MCP Agent Traces
 
 ```powershell
-docker compose run --rm metrogenn python scripts/evaluate_mcp_agent_traces.py --traces /app/saved_results/agent_traces.jsonl
+docker compose run --rm metrognn python scripts/evaluate_mcp_agent_traces.py --traces /app/saved_results/agent_traces.jsonl
 ```
 
 Scores a complete saved trace file against
@@ -168,14 +168,14 @@ debugging incomplete trace captures.
 ## Profile Training And Serving
 
 ```powershell
-docker compose run --rm metrogenn python scripts/profile_training.py --steps 20
+docker compose run --rm metrognn python scripts/profile_training.py --steps 20
 ```
 
 Profiles target construction and warm training-step latency without overwriting
 checkpoints.
 
 ```powershell
-docker compose run --rm metrogenn python scripts/profile_serving.py --runs 20 --query "graph neural networks"
+docker compose run --rm metrognn python scripts/profile_serving.py --runs 20 --query "graph neural networks"
 ```
 
 Profiles artifact validation/loading, warm GNN forward latency, and optional
@@ -184,19 +184,19 @@ end-to-end query latency.
 ## Health Checks Used During Validation
 
 ```powershell
-docker compose run --rm metrogenn python -m compileall -q gnn_pipeline scripts mcp_server
+docker compose run --rm metrognn python -m compileall -q gnn_pipeline scripts mcp_server
 ```
 
 Compiles Python files inside the container and catches syntax errors.
 
 ```powershell
-docker compose run --rm metrogenn python -c "import torch, torch_geometric, pandas, chromadb, sentence_transformers, yaml; print('imports ok')"
+docker compose run --rm metrognn python -c "import torch, torch_geometric, pandas, chromadb, sentence_transformers, yaml; print('imports ok')"
 ```
 
 Checks that the important runtime dependencies import correctly.
 
 ```powershell
-docker compose run --rm metrogenn python -c "from mcp_server.server import mcp; print('mcp import ok', mcp.name)"
+docker compose run --rm metrognn python -c "from mcp_server.server import mcp; print('mcp import ok', mcp.name)"
 ```
 
 Checks that the MCP server module imports correctly.
@@ -204,7 +204,7 @@ Checks that the MCP server module imports correctly.
 ## Open A Shell In The Container
 
 ```powershell
-docker compose run --rm metrogenn /bin/sh
+docker compose run --rm metrognn /bin/sh
 ```
 
 Starts an interactive shell in the container for debugging.
@@ -243,7 +243,74 @@ persist on the host.
 - Hugging Face may print an unauthenticated request warning. The model still
   runs, but setting `HF_TOKEN` can improve rate limits.
 - Prefer direct command overrides like
-  `docker compose run --rm metrogenn python scripts/test_pipeline.py`.
+  `docker compose run --rm metrognn python scripts/test_pipeline.py`.
   Passing `-e METROGNN_COMMAND=...` to `docker compose run` does not override the
   Compose command reliably because `${METROGNN_COMMAND}` is expanded by Compose
   before container environment variables are applied.
+
+## GPU Docker Variant
+
+Use the GPU variant only on a workstation with an NVIDIA GPU, a recent NVIDIA
+driver, and Docker GPU support enabled. The regular `Dockerfile` and
+`docker-compose.yml` remain CPU-only; the GPU path uses `Dockerfile.gpu` and
+`docker-compose.gpu.yml`.
+
+The CUDA/PyTorch dependencies are large. Before building, make sure the drive
+that stores Docker Desktop's Linux disk image has at least 25-40 GB free. On
+Windows this is often under Docker Desktop's WSL disk location, even when the
+project itself lives on another drive. If Docker reports an EOF or gRPC
+disconnect while extracting or installing multi-GB CUDA/PyTorch layers, free
+space on that drive or move Docker Desktop's disk image location to a larger
+drive, then retry.
+
+First check that the host sees the GPU:
+
+```powershell
+nvidia-smi
+```
+
+Then check that Docker can pass the GPU into a container:
+
+```powershell
+docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
+```
+
+Build the GPU image:
+
+```powershell
+docker compose -f docker-compose.gpu.yml build
+```
+
+Confirm PyTorch sees CUDA inside the GPU container:
+
+```powershell
+docker compose -f docker-compose.gpu.yml run --rm metrognn python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no cuda')"
+```
+
+Run the default MetroGNN demo on GPU when CUDA is available:
+
+```powershell
+docker compose -f docker-compose.gpu.yml run --rm metrognn
+```
+
+Run a custom query on GPU:
+
+```powershell
+docker compose -f docker-compose.gpu.yml run --rm metrognn python -m gnn_pipeline.inference -q "graph neural networks" -t 5 -k 50 --device auto --output /app/saved_results/gpu_inference.json
+```
+
+Force CPU inside the GPU image when debugging:
+
+```powershell
+docker compose -f docker-compose.gpu.yml run --rm metrognn python -m gnn_pipeline.inference -q "graph neural networks" --device cpu
+```
+
+Training and bootstrap also accept a device flag:
+
+```powershell
+docker compose -f docker-compose.gpu.yml run --rm metrognn python scripts/train_pipeline.py --device auto
+docker compose -f docker-compose.gpu.yml run --rm metrognn python scripts/bootstrap_artifacts.py --force-train --force-vector --device auto
+```
+
+The GPU image is much larger than the CPU image because it installs CUDA-enabled
+PyTorch and matching PyTorch Geometric CUDA wheels.

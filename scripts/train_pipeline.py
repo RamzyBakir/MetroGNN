@@ -1,12 +1,14 @@
 """Build the versioned MetroGNN recommendation graph and train its GNN."""
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
+import torch
 
 from gnn_pipeline.artifacts import (
     create_pipeline_manifest,
@@ -24,17 +26,28 @@ from gnn_pipeline.data.validation import (
     validate_knowledge_graph,
     validate_papers_dataframe,
 )
-from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
 from gnn_pipeline.models.training import (
     set_external_data,
     set_training_seed,
-    train_enhanced_model,
 )
 
 
-def build_and_train(force_topics: bool = False, seed: int = 42):
+def _resolve_device(device: str | None = None) -> torch.device:
+    requested = (device or os.environ.get("METROGNN_DEVICE", "auto")).lower()
+    if requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if requested.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA was requested, but PyTorch cannot see a GPU. "
+            "Use --device cpu or run with the GPU Docker Compose file."
+        )
+    return torch.device(requested)
+
+
+def build_and_train(force_topics: bool = False, seed: int = 42, device: str | None = None):
     ensure_dirs()
     set_training_seed(seed)
+    resolved_device = _resolve_device(device)
 
     csv_path = get_path("data", "csv_path")
     topic_info_path = get_path("data", "topic_json_path")
@@ -112,22 +125,38 @@ def build_and_train(force_topics: bool = False, seed: int = 42):
     write_json_atomic(manifest_path, manifest)
     print(f"Manifest: {manifest_path}")
 
-    print("\n6. Training the versioned GNN...")
-    model = AdvancedHeteroGCN(
-        hidden_channels=get_value("training", "hidden_channels"),
-        out_channels=get_value("training", "out_channels"),
-        num_layers=get_value("training", "num_layers"),
-        num_classes=get_value("training", "num_classes"),
-        num_topics=len(topic_info),
-    )
+    print(f"\n6. Training the versioned GNN on {resolved_device}...")
+    model_kwargs = {
+        "hidden_channels": get_value("training", "hidden_channels"),
+        "out_channels": get_value("training", "out_channels"),
+        "num_layers": get_value("training", "num_layers"),
+        "num_classes": get_value("training", "num_classes"),
+        "num_topics": len(topic_info),
+    }
+    if resolved_device.type == "cuda":
+        from gnn_pipeline.models.gnn_model_gpu import AdvancedHeteroGCN_GPU
+        from gnn_pipeline.models.training_gpu import train_enhanced_model_gpu
+
+        model = AdvancedHeteroGCN_GPU(**model_kwargs, device=resolved_device)
+        train_fn = train_enhanced_model_gpu
+        train_kwargs = {"device": resolved_device}
+    else:
+        from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
+        from gnn_pipeline.models.training import train_enhanced_model
+
+        model = AdvancedHeteroGCN(**model_kwargs)
+        train_fn = train_enhanced_model
+        train_kwargs = {}
+
     set_external_data(df, author_to_idx)
-    trained_model, train_losses, val_metrics, *_ = train_enhanced_model(
+    trained_model, train_losses, val_metrics, *_ = train_fn(
         model,
         graph,
         epochs=get_value("training", "epochs"),
         checkpoint_path=model_path,
         pipeline_id=manifest["pipeline_id"],
         seed=seed,
+        **train_kwargs,
     )
     update_manifest_model(manifest_path, model_path, trained_model.get_config())
 
@@ -150,5 +179,18 @@ if __name__ == "__main__":
         default=42,
         help="Random seed for reproducible training",
     )
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default=os.environ.get("METROGNN_DEVICE", "auto"),
+        help="Training device. auto uses CUDA when PyTorch can see a GPU.",
+    )
     args = parser.parse_args()
-    build_and_train(force_topics=args.force_topics, seed=args.seed)
+    try:
+        build_and_train(
+            force_topics=args.force_topics,
+            seed=args.seed,
+            device=args.device,
+        )
+    except RuntimeError as exc:
+        raise SystemExit(f"Error: {exc}") from None

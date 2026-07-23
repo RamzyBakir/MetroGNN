@@ -30,13 +30,22 @@ indexes, and results are intentionally ignored by Git.
 
 ```bash
 docker compose build
-docker compose run --rm metrogenn
+docker compose run --rm metrognn
 ```
 
 On a new machine, the default Docker run validates the runtime artifacts. If
 `models` is empty, it builds the graph, topics, checkpoint, and vector store from
 the bundled CSV at `train/DBLP-Citation-network-V18-1-20-25_clean.csv`, then runs
 the demo inference query. The bootstrap/training path uses seed `42` by default.
+
+For an NVIDIA GPU workstation, use the separate GPU Compose file:
+
+```bash
+docker compose -f docker-compose.gpu.yml build
+docker compose -f docker-compose.gpu.yml run --rm metrognn
+```
+
+See `DOCKER.md` for GPU checks and `--device auto|cpu|cuda` examples.
 
 ## Versioned build workflow
 
