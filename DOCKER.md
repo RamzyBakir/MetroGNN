@@ -239,7 +239,7 @@ persist on the host.
 
 ## Notes
 
-- The image is CPU-only because it installs `torch==2.12.1+cpu`.
+- The default image is CPU-only because it installs `torch==2.12.1+cpu`.
 - Hugging Face may print an unauthenticated request warning. The model still
   runs, but setting `HF_TOKEN` can improve rate limits.
 - Prefer direct command overrides like
@@ -250,7 +250,7 @@ persist on the host.
 
 ## GPU Docker Variant
 
-Use the GPU variant only on a workstation with an NVIDIA GPU, a recent NVIDIA
+Use the GPU variant on a workstation with an NVIDIA GPU, a recent NVIDIA
 driver, and Docker GPU support enabled. The regular `Dockerfile` and
 `docker-compose.yml` remain CPU-only; the GPU path uses `Dockerfile.gpu` and
 `docker-compose.gpu.yml`.
@@ -305,12 +305,18 @@ Force CPU inside the GPU image when debugging:
 docker compose -f docker-compose.gpu.yml run --rm metrognn python -m gnn_pipeline.inference -q "graph neural networks" --device cpu
 ```
 
-Training and bootstrap also accept a device flag:
+Training and bootstrap accept the `--device cuda` flag:
 
 ```powershell
-docker compose -f docker-compose.gpu.yml run --rm metrognn python scripts/train_pipeline.py --device auto
-docker compose -f docker-compose.gpu.yml run --rm metrognn python scripts/bootstrap_artifacts.py --force-train --force-vector --device auto
+docker compose -f docker-compose.gpu.yml run --rm metrognn python scripts/train_pipeline.py --device cuda
+docker compose -f docker-compose.gpu.yml run --rm metrognn python scripts/bootstrap_artifacts.py --force-train --force-vector --device cuda
 ```
 
-The GPU image is much larger than the CPU image because it installs CUDA-enabled
+Generate all evaluation reports, LaTeX tables, and publication visualizations on GPU:
+
+```powershell
+docker compose -f docker-compose.gpu.yml run --rm metrognn python scripts/generate_all_results.py --device cuda
+```
+
+The GPU image is larger than the CPU image because it installs CUDA-enabled
 PyTorch and matching PyTorch Geometric CUDA wheels.

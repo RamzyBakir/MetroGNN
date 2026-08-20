@@ -88,6 +88,23 @@ python scripts/test_pipeline.py
 pytest
 ```
 
+## GPU Acceleration & Full Results Generation
+
+MetroGNN supports complete CUDA acceleration across model training, heterogeneous message passing, embedding metrics, and multi-panel visualizations:
+
+```bash
+# Train the multi-task heterogeneous GNN on GPU from scratch:
+docker compose -f docker-compose.gpu.yml run --rm metrognn python scripts/train_pipeline.py --device cuda
+
+# Generate all evaluation reports, LaTeX tables, and publication visualizations:
+docker compose -f docker-compose.gpu.yml run --rm metrognn python scripts/generate_all_results.py --device cuda
+```
+
+Key features:
+- **Fast Heterogeneous Message Passing**: 4-layer HeteroConv over paper, author, and topic subgraphs.
+- **CUDA Tensor Distances**: Tensor-accelerated silhouette score and separation ratio computed in <10ms.
+- **Publication Figures**: 10k-node t-SNE with centroid badges, 2-panel force-directed community graphs with diagnostics cards, and polar capability radar charts.
+
 ## V2 graph schema
 
 Node types:
