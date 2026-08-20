@@ -5,7 +5,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import Field
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 from mcp_server.models.schemas import (
     AnalyzeCommunityInput,

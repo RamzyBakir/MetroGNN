@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated, Dict, List, Literal, Optional
 
 import torch
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from gnn_pipeline.artifacts import validate_pipeline_manifest

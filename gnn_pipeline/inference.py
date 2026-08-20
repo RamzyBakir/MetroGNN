@@ -316,9 +316,7 @@ def run_inference(
                 "paper_id": pid,
                 "title": row.get("title", f"Paper {pid}"),
                 "year": int(row["year"]) if pd.notna(row.get("year")) else None,
-                "citations": int(row["n_citation"])
-                if pd.notna(row.get("n_citation"))
-                else 0,
+                "citations": int(v) if not pd.isna(v := pd.to_numeric(row.get("n_citation"), errors="coerce")) else 0,
                 "venue": row.get("venue", ""),
                 "topic_id": int(topic_id) if topic_id >= 0 else None,
                 "topic_name": inferencer.topic_names.get(

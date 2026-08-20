@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 
 from gnn_pipeline.config import ensure_dirs, get_config, get_path, get_value
 
@@ -43,7 +43,7 @@ class AppContext:
 
 
 @asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+async def app_lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
     ensure_dirs()
     ctx = AppContext()
     logger.info("MetroGNN MCP server started")
@@ -53,7 +53,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         logger.info("MetroGNN MCP server shutting down")
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     name="MetroGNN",
     lifespan=app_lifespan,
     instructions=(

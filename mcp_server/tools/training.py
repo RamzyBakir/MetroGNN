@@ -3,7 +3,7 @@ import os
 from typing import Annotated
 
 import pandas as pd
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from gnn_pipeline.artifacts import (

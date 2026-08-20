@@ -2,7 +2,7 @@ import json
 import logging
 from typing import Any, Dict
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 from mcp_server.models.schemas import GraphInfoOutput
 from mcp_server.server import _get_ctx, mcp
