@@ -133,20 +133,12 @@ def build_and_train(force_topics: bool = False, seed: int = 42, device: str | No
         "num_classes": get_value("training", "num_classes"),
         "num_topics": len(topic_info),
     }
-    if resolved_device.type == "cuda":
-        from gnn_pipeline.models.gnn_model_gpu import AdvancedHeteroGCN_GPU
-        from gnn_pipeline.models.training_gpu import train_enhanced_model_gpu
+    from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
+    from gnn_pipeline.models.training import train_enhanced_model
 
-        model = AdvancedHeteroGCN_GPU(**model_kwargs, device=resolved_device)
-        train_fn = train_enhanced_model_gpu
-        train_kwargs = {"device": resolved_device}
-    else:
-        from gnn_pipeline.models.gnn_model import AdvancedHeteroGCN
-        from gnn_pipeline.models.training import train_enhanced_model
-
-        model = AdvancedHeteroGCN(**model_kwargs)
-        train_fn = train_enhanced_model
-        train_kwargs = {}
+    model = AdvancedHeteroGCN(**model_kwargs).to(resolved_device)
+    train_fn = train_enhanced_model
+    train_kwargs = {"device": resolved_device}
 
     set_external_data(df, author_to_idx)
     trained_model, train_losses, val_metrics, *_ = train_fn(

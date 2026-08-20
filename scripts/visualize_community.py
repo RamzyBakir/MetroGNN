@@ -126,13 +126,13 @@ def main():
     detected_names = [topic_names.get(tid, f"Topic_{tid}") for tid in topic_ids]
     print(f"Detected topic IDs {topic_ids}: {', '.join(detected_names)}")
 
-    print("Running model forward pass ...")
+    print(f"Running model forward pass on {device} ...")
     model.eval()
-    model_cpu = model.to("cpu")
-    graph_cpu = graph.to("cpu")
+    model_dev = model.to(device)
+    graph_dev = graph.to(device)
     with torch.no_grad():
-        x_dict, imp_logits, role_logits, inf_scores = model_cpu(
-            graph_cpu.x_dict, graph_cpu.edge_index_dict
+        x_dict, imp_logits, role_logits, inf_scores = model_dev(
+            graph_dev.x_dict, graph_dev.edge_index_dict
         )
 
     updated_embeddings = {
@@ -141,6 +141,7 @@ def main():
         "paper_quality": x_dict.get("paper_quality"),
     }
 
+    graph_cpu = graph.to("cpu")
     print("Analyzing community ...")
     community_data = advanced_community_analysis(
         topic_ids,

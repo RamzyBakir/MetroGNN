@@ -19,39 +19,48 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         relevant_papers.update(paper_indices)
 
     author_edges = data['author', 'authored', 'paper'].edge_index.numpy()
+    collaboration_edges = data['author', 'collaborates_with', 'author'].edge_index.numpy()
 
+    author_to_papers = {}
+    paper_to_authors = {}
+    for a, p in zip(author_edges[0], author_edges[1]):
+        a_i, p_i = int(a), int(p)
+        if a_i not in author_to_papers:
+            author_to_papers[a_i] = []
+        author_to_papers[a_i].append(p_i)
+        if p_i not in paper_to_authors:
+            paper_to_authors[p_i] = []
+        paper_to_authors[p_i].append(a_i)
+
+    author_collaborators = {}
+    for a1, a2 in zip(collaboration_edges[0], collaboration_edges[1]):
+        a1_i, a2_i = int(a1), int(a2)
+        if a1_i not in author_collaborators:
+            author_collaborators[a1_i] = []
+        author_collaborators[a1_i].append(a2_i)
 
     relevant_authors = set()
     topic_author_counts = {}
 
     for paper_id in relevant_papers:
-        paper_authors = author_edges[0][author_edges[1] == paper_id]
-        for author in paper_authors:
-            author_int = int(author)
+        for author_int in paper_to_authors.get(int(paper_id), []):
             relevant_authors.add(author_int)
-
             topic_author_counts[author_int] = topic_author_counts.get(author_int, 0) + 1
 
-
-    collaboration_edges = data['author', 'collaborates_with', 'author'].edge_index.numpy()
     community_members = set(relevant_authors)
 
     for res in relevant_authors:
-        collaborators = collaboration_edges[1][collaboration_edges[0] == res]
-
-        for collab in collaborators:
-            collab_int = int(collab)
-
-            collab_papers = author_edges[1][author_edges[0] == collab_int]
-            has_topic_papers = any(paper in relevant_papers for paper in collab_papers)
+        for collab_int in author_collaborators.get(res, []):
+            collab_papers = author_to_papers.get(collab_int, [])
+            has_topic_papers = any(p in relevant_papers for p in collab_papers)
             if has_topic_papers or topic_author_counts.get(res, 0) > 2:
                 community_members.add(collab_int)
 
-    community_members = [int(member) for member in community_members]
+    community_members_set = set(community_members)
+    community_members = list(community_members)
 
     if not community_members:
         return {"error": "No researchers found for the specified topics."}
-
 
     G_community = nx.Graph()
     for researcher_id in community_members:
@@ -60,34 +69,53 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
     for i in range(collaboration_edges.shape[1]):
         src, dst = collaboration_edges[:, i]
         src_int, dst_int = int(src), int(dst)
-        if src_int in community_members and dst_int in community_members:
+        if src_int in community_members_set and dst_int in community_members_set:
             G_community.add_edge(src_int, dst_int)
 
 
     if len(community_members) > 1:
         centrality = nx.degree_centrality(G_community)
-        betweenness = nx.betweenness_centrality(G_community)
-        clustering = nx.clustering(G_community)
+        k_samples = min(100, len(G_community)) if len(G_community) > 200 else None
+        betweenness = nx.betweenness_centrality(G_community, k=k_samples, seed=42)
+        if len(G_community) > 2000:
+            sample_nodes = list(G_community.nodes())[:500]
+            sample_clustering = nx.clustering(G_community, nodes=sample_nodes)
+            clustering = {n: sample_clustering.get(n, 0.0) for n in G_community.nodes()}
+        else:
+            clustering = nx.clustering(G_community)
         density = nx.density(G_community)
     else:
         centrality, betweenness, clustering = {}, {}, {}
         density = 0
 
-
     importance_predictions = importance_logits.argmax(dim=1) if importance_logits is not None else None
     role_predictions = role_logits.argmax(dim=1) if role_logits is not None else None
     influence_values = influence_scores.squeeze() if influence_scores is not None else None
-
 
     key_members = []
     other_members = []
 
     paper_quality_scores = updated_embeddings.get('paper_quality', None)
+    paper_emb = updated_embeddings.get('paper', None)
+    if paper_emb is not None and isinstance(paper_emb, torch.Tensor):
+        paper_norms = torch.norm(paper_emb, dim=1).cpu().numpy()
+    elif paper_emb is not None and isinstance(paper_emb, np.ndarray):
+        paper_norms = np.linalg.norm(paper_emb, axis=1)
+    else:
+        paper_norms = None
+
     authored_edges = data['author', 'authored', 'paper'].edge_index.numpy()
+    author_to_papers = {}
+    for a, p in zip(authored_edges[0], authored_edges[1]):
+        a_int, p_int = int(a), int(p)
+        if a_int not in author_to_papers:
+            author_to_papers[a_int] = []
+        author_to_papers[a_int].append(p_int)
+
+    paper_features = data['paper'].x.numpy()
 
     for researcher_id in community_members:
-
-        researcher_papers = authored_edges[1][authored_edges[0] == researcher_id]
+        researcher_papers = author_to_papers.get(researcher_id, [])
         topic_specific_papers = len([p for p in researcher_papers if p in relevant_papers])
         total_papers = len(researcher_papers)
         topic_specialization = topic_specific_papers / max(total_papers, 1)
@@ -103,7 +131,6 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
             "total_papers": total_papers,
             "topic_specialization_score": topic_specialization
         }
-
 
         if role_predictions is not None:
             role_idx = role_predictions[researcher_id].item()
@@ -126,18 +153,22 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
             researcher_data["importance"] = "Medium"
             researcher_data["importance_score"] = 0.5
 
-
         if paper_quality_scores is not None and len(researcher_papers) > 0:
             researcher_data["paper_quality"] = calculate_realistic_paper_quality(
-                updated_embeddings['paper'], researcher_papers, relevant_papers
+                paper_norms, researcher_papers, relevant_papers
             )
         else:
             researcher_data["paper_quality"] = 0.5
 
-
-        researcher_data["freshness_score"] = calculate_researcher_freshness(researcher_id, data,
-                                                                            updated_embeddings.get('paper', None))
-
+        if len(researcher_papers) > 0:
+            recency_scores = [
+                max(0.0, 1.0 - (paper_features[p][2] / 20.0))
+                for p in researcher_papers
+                if p < len(paper_features)
+            ]
+            researcher_data["freshness_score"] = float(np.mean(recency_scores)) if recency_scores else 0.5
+        else:
+            researcher_data["freshness_score"] = 0.5
 
         composite_score = (
             researcher_data["importance_score"] * 0.3 +
@@ -147,7 +178,6 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
             researcher_data["topic_specialization"] * 0.15
         )
         researcher_data["composite_score"] = min(composite_score, 1.0)
-
 
         dynamic_threshold = dynamic_key_member_threshold(
             len(community_members),
@@ -166,13 +196,11 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         else:
             other_members.append(researcher_data)
 
-
     if key_members:
         key_members = topic_specialized_researcher_ranking(key_members, query_topics, data)
 
     if other_members:
         other_members = topic_specialized_researcher_ranking(other_members, query_topics, data)
-
 
     if key_members + other_members:
         avg_influence = np.mean([m['global_influence'] for m in key_members + other_members])
@@ -191,15 +219,12 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         "topic_specialization": avg_topic_specialization,
     }
 
-
     additional_metrics = calculate_additional_metrics({
         'key_members': key_members,
         'community_metrics': community_metrics
     })
 
-
     community_metrics.update(additional_metrics)
-
 
     enhanced_analysis = {
         "avg_influence": avg_influence,
@@ -224,39 +249,26 @@ def advanced_community_analysis (query_topics, updated_embeddings, data, topic_n
         "enhanced_analysis": enhanced_analysis
     }
 
-def calculate_realistic_paper_quality(paper_embeddings, researcher_papers, relevant_papers):
-
-    if paper_embeddings is None or len(researcher_papers) == 0:
-
+def calculate_realistic_paper_quality(paper_norms, researcher_papers, relevant_papers):
+    if paper_norms is None or len(researcher_papers) == 0:
         return 0.3 + (hash(str(tuple(researcher_papers))) % 70) / 100.0
 
     try:
-
-        paper_embeds = paper_embeddings[researcher_papers]
-
-
-        embedding_norms = torch.norm(paper_embeds, dim=1)
-
-
+        norms = [paper_norms[p] for p in researcher_papers if p < len(paper_norms)]
+        avg_norm = float(np.mean(norms)) if norms else 1.0
         relevant_count = sum(1 for p in researcher_papers if p in relevant_papers)
         relevance_bonus = 0.2 * (relevant_count / max(len(researcher_papers), 1))
 
-
-        avg_norm = embedding_norms.mean().item()
-
-
         researcher_id = researcher_papers[0] if len(researcher_papers) > 0 else 0
         researcher_variation = (hash(str(researcher_id)) % 100) / 200.0
-
 
         base_quality = 0.3 + (avg_norm / 3.0) * 0.5
         normalized_quality = base_quality + researcher_variation + relevance_bonus
         normalized_quality = min(normalized_quality, 0.95)
         normalized_quality = max(normalized_quality, 0.3)
 
-        return round(normalized_quality, 3)
+        return round(float(normalized_quality), 3)
     except:
-
         return 0.4 + (hash(str(len(researcher_papers))) % 60) / 100.0
 
 def calculate_researcher_freshness(researcher_id, data, paper_embeddings):
@@ -299,45 +311,21 @@ def dynamic_key_member_threshold(community_size, avg_influence):
     return base_threshold
 
 def topic_specialized_researcher_ranking(researchers, query_topics, data):
-
-    paper_topic_edges = data['paper', 'has_topic', 'topic'].edge_index.numpy()
-    authored_edges = data['author', 'authored', 'paper'].edge_index.numpy()
-
     ranked_researchers = []
     for researcher in researchers:
-        researcher_id = int(researcher['id'][1:])
-
-
-        researcher_papers = authored_edges[1][authored_edges[0] == researcher_id]
-        topic_expertise = 0
-
-        for paper_id in researcher_papers:
-            paper_topics = paper_topic_edges[1][paper_topic_edges[0] == paper_id]
-            if any(topic in query_topics for topic in paper_topics):
-                topic_expertise += 1
-
-
-        if 'topic_specialization_score' not in researcher:
-            researcher['topic_specialization_score'] = researcher.get('topic_specialization', 0)
-
-        if 'composite_score' not in researcher:
-            researcher['composite_score'] = 0.5
-
-        if 'freshness_score' not in researcher:
-            researcher['freshness_score'] = 0.5
-
+        topic_expertise = researcher.get("topic_paper_count", 0)
+        topic_spec = researcher.get("topic_specialization", 0.0)
+        comp_score = researcher.get("composite_score", 0.5)
+        fresh_score = researcher.get("freshness_score", 0.5)
 
         researcher['topic_expertise'] = topic_expertise
-        researcher['topic_specialization_score'] = (topic_expertise / max(len(researcher_papers), 1))
-
-
+        researcher['topic_specialization_score'] = topic_spec
         researcher['enhanced_score'] = (
-            researcher['composite_score'] * 0.6 +
-            researcher['topic_specialization_score'] * 0.25 +
-            researcher['freshness_score'] * 0.15
+            comp_score * 0.6 +
+            topic_spec * 0.25 +
+            fresh_score * 0.15
         )
         ranked_researchers.append(researcher)
-
 
     return sorted(ranked_researchers, key=lambda x: x['enhanced_score'], reverse=True)
 

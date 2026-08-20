@@ -638,77 +638,135 @@ class GNNEvaluator:
 
     def evaluate_embedding_quality(
         self,
-        embeddings: np.ndarray,
-        labels: np.ndarray,
+        embeddings: Union[np.ndarray, torch.Tensor],
+        labels: Union[np.ndarray, torch.Tensor],
         metric: str = "cosine",
+        device: Optional[str] = None,
     ) -> Dict[str, float]:
         """
-        Evaluate quality of learned embeddings using geometric metrics.
+        Evaluate quality of learned embeddings using geometric metrics with optional GPU acceleration.
 
         Args:
             embeddings: Learned node embeddings (N, D)
             labels: Node labels for supervised quality assessment
-            metric: Distance metric for silhouette score
+            metric: Distance metric ('cosine' or 'euclidean')
+            device: Optional device override ('cuda', 'cpu', or auto)
 
         Returns:
             Dictionary of embedding quality metrics
         """
         quality = {}
 
+        use_cuda = False
+        if device == "cuda" or (device is None and torch.cuda.is_available()):
+            use_cuda = True
+
+        if isinstance(embeddings, torch.Tensor):
+            emb_tensor = embeddings.float().to("cuda" if use_cuda else "cpu")
+            emb_np = emb_tensor.detach().cpu().numpy()
+        else:
+            emb_np = np.asarray(embeddings, dtype=np.float32)
+            emb_tensor = torch.from_numpy(emb_np).to("cuda" if use_cuda else "cpu")
+
+        if isinstance(labels, torch.Tensor):
+            lbl_np = labels.detach().cpu().numpy().squeeze()
+            lbl_tensor = labels.to("cuda" if use_cuda else "cpu").squeeze()
+        else:
+            lbl_np = np.asarray(labels).squeeze()
+            lbl_tensor = torch.from_numpy(lbl_np).to("cuda" if use_cuda else "cpu").squeeze()
+
         # Silhouette score (higher = better separated clusters)
-        if len(np.unique(labels)) > 1:
-            quality["silhouette_score"] = silhouette_score(
-                embeddings, labels, metric=metric
+        _MAX_SUBSAMPLE = 10000 if use_cuda else 5000
+        unique_labels_np = np.unique(lbl_np)
+        if len(unique_labels_np) > 1:
+            quality["silhouette_score"] = float(
+                silhouette_score(
+                    emb_np,
+                    lbl_np,
+                    metric=metric,
+                    sample_size=min(len(emb_np), _MAX_SUBSAMPLE),
+                    random_state=self.random_seed,
+                )
             )
 
-        # Intra-class compactness and inter-class separation
-        unique_labels = np.unique(labels)
+        # Intra-class compactness and inter-class separation (GPU tensor acceleration)
         intra_distances = []
         inter_distances = []
 
-        _MAX_SUBSAMPLE = 5000
+        if use_cuda and metric == "cosine":
+            norm_emb = F.normalize(emb_tensor, p=2, dim=1)
+            unique_labels = torch.unique(lbl_tensor)
 
-        for label in unique_labels:
-            class_embeddings = embeddings[labels == label]
-            if len(class_embeddings) > _MAX_SUBSAMPLE:
-                class_embeddings = class_embeddings[
-                    np.random.choice(
-                        len(class_embeddings), _MAX_SUBSAMPLE, replace=False
-                    )
-                ]
-            if len(class_embeddings) > 1:
-                intra_distances.append(np.mean(pdist(class_embeddings, metric=metric)))
+            for u_lbl in unique_labels:
+                mask = lbl_tensor == u_lbl
+                c_emb = norm_emb[mask]
+                if len(c_emb) > _MAX_SUBSAMPLE:
+                    idx = torch.randperm(len(c_emb), device="cuda")[:_MAX_SUBSAMPLE]
+                    c_emb = c_emb[idx]
 
-            other_embeddings = embeddings[labels != label]
-            if len(other_embeddings) > _MAX_SUBSAMPLE:
-                other_embeddings = other_embeddings[
-                    np.random.choice(
-                        len(other_embeddings), _MAX_SUBSAMPLE, replace=False
-                    )
-                ]
-            if len(other_embeddings) > 0 and len(class_embeddings) > 0:
-                inter_distances.append(
-                    float(
-                        np.mean(
-                            cdist(class_embeddings, other_embeddings, metric=metric)
+                if len(c_emb) > 1:
+                    sim_mat = torch.mm(c_emb, c_emb.t())
+                    n = sim_mat.size(0)
+                    triu_idx = torch.triu_indices(n, n, offset=1, device="cuda")
+                    intra_dist = (1.0 - sim_mat[triu_idx[0], triu_idx[1]]).mean().item()
+                    intra_distances.append(float(intra_dist))
+
+                o_emb = norm_emb[~mask]
+                if len(o_emb) > _MAX_SUBSAMPLE:
+                    idx = torch.randperm(len(o_emb), device="cuda")[:_MAX_SUBSAMPLE]
+                    o_emb = o_emb[idx]
+
+                if len(o_emb) > 0 and len(c_emb) > 0:
+                    sim_cross = torch.mm(c_emb, o_emb.t())
+                    inter_dist = (1.0 - sim_cross).mean().item()
+                    inter_distances.append(float(inter_dist))
+        else:
+            for label in unique_labels_np:
+                class_embeddings = emb_np[lbl_np == label]
+                if len(class_embeddings) > _MAX_SUBSAMPLE:
+                    class_embeddings = class_embeddings[
+                        np.random.choice(
+                            len(class_embeddings), _MAX_SUBSAMPLE, replace=False
+                        )
+                    ]
+                if len(class_embeddings) > 1:
+                    intra_distances.append(np.mean(pdist(class_embeddings, metric=metric)))
+
+                other_embeddings = emb_np[lbl_np != label]
+                if len(other_embeddings) > _MAX_SUBSAMPLE:
+                    other_embeddings = other_embeddings[
+                        np.random.choice(
+                            len(other_embeddings), _MAX_SUBSAMPLE, replace=False
+                        )
+                    ]
+                if len(other_embeddings) > 0 and len(class_embeddings) > 0:
+                    inter_distances.append(
+                        float(
+                            np.mean(
+                                cdist(class_embeddings, other_embeddings, metric=metric)
+                            )
                         )
                     )
-                )
 
         quality["mean_intra_distance"] = (
-            np.mean(intra_distances) if intra_distances else 0.0
+            float(np.mean(intra_distances)) if intra_distances else 0.0
         )
         quality["mean_inter_distance"] = (
-            np.mean(inter_distances) if inter_distances else 0.0
+            float(np.mean(inter_distances)) if inter_distances else 0.0
         )
         quality["separation_ratio"] = quality["mean_inter_distance"] / max(
             quality["mean_intra_distance"], 1e-8
         )
 
         # Embedding norm statistics
-        norms = np.linalg.norm(embeddings, axis=1)
-        quality["mean_norm"] = float(np.mean(norms))
-        quality["norm_std"] = float(np.std(norms))
+        if use_cuda:
+            norms = torch.norm(emb_tensor, dim=1)
+            quality["mean_norm"] = float(norms.mean().item())
+            quality["norm_std"] = float(norms.std().item())
+        else:
+            norms = np.linalg.norm(emb_np, axis=1)
+            quality["mean_norm"] = float(np.mean(norms))
+            quality["norm_std"] = float(np.std(norms))
 
         return quality
 
@@ -935,42 +993,131 @@ class GNNEvaluator:
 
     def plot_tsne_embeddings(
         self,
-        embeddings: np.ndarray,
-        labels: np.ndarray,
+        embeddings: Union[np.ndarray, torch.Tensor],
+        labels: Union[np.ndarray, torch.Tensor],
         label_names: Optional[Dict[int, str]] = None,
-        title: str = "t-SNE Visualization",
+        title: str = "t-SNE Embedding Manifold",
         save_path: Optional[str] = None,
-        figsize: Tuple[int, int] = (10, 8),
+        figsize: Tuple[int, int] = (11, 8.5),
+        max_samples: int = 10000,
     ) -> plt.Figure:
-        """Plot t-SNE visualization of embeddings colored by labels."""
-        tsne = TSNE(
-            n_components=2,
-            random_state=self.random_seed,
-            perplexity=min(30, len(embeddings) - 1),
-        )
-        embeddings_2d = tsne.fit_transform(embeddings)
+        """
+        Plot publication-grade t-SNE visualization with GPU acceleration (cuML if available),
+        high-contrast cluster palettes, annotated centroids, and distribution legends.
+        """
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.detach().cpu().numpy()
+        if isinstance(labels, torch.Tensor):
+            labels = labels.detach().cpu().numpy()
 
-        fig, ax = plt.subplots(figsize=figsize)
+        embeddings = np.asarray(embeddings, dtype=np.float32)
+        labels = np.asarray(labels).squeeze()
+
+        total_nodes = len(embeddings)
+        if total_nodes > max_samples:
+            indices = np.random.RandomState(self.random_seed).choice(
+                total_nodes, max_samples, replace=False
+            )
+            embeddings = embeddings[indices]
+            labels = labels[indices]
+
+        # Check for GPU-accelerated cuML
+        embeddings_2d = None
+        try:
+            from cuml.manifold import TSNE as cumlTSNE
+            tsne_gpu = cumlTSNE(
+                n_components=2,
+                random_state=self.random_seed,
+                perplexity=min(35, len(embeddings) - 1),
+            )
+            embeddings_2d = tsne_gpu.fit_transform(embeddings)
+            if hasattr(embeddings_2d, "to_numpy"):
+                embeddings_2d = embeddings_2d.to_numpy()
+        except Exception:
+            pass
+
+        if embeddings_2d is None:
+            tsne = TSNE(
+                n_components=2,
+                init="pca",
+                learning_rate="auto",
+                random_state=self.random_seed,
+                perplexity=min(35, len(embeddings) - 1),
+            )
+            embeddings_2d = tsne.fit_transform(embeddings)
+
+        fig, ax = plt.subplots(figsize=figsize, dpi=300)
 
         unique_labels = sorted(np.unique(labels))
-        colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))
+        n_classes = len(unique_labels)
+
+        # High-contrast modern color schemes
+        if n_classes == 3:
+            class_colors = ["#2A9D8F", "#E9C46A", "#E76F51"]  # Teal, Gold, Coral
+        elif n_classes == 4:
+            class_colors = ["#E63946", "#F4A261", "#2A9D8F", "#457B9D"]  # Red, Amber, Teal, Ocean
+        else:
+            class_colors = [plt.cm.tab10(i / max(n_classes - 1, 1)) for i in range(n_classes)]
 
         for i, label in enumerate(unique_labels):
             mask = labels == label
+            count = int(np.sum(mask))
+            pct = (count / len(labels)) * 100.0
             name = label_names.get(label, str(label)) if label_names else str(label)
+            label_str = f"{name} ({pct:.1f}%, n={count:,})"
+
+            pts = embeddings_2d[mask]
             ax.scatter(
-                embeddings_2d[mask, 0],
-                embeddings_2d[mask, 1],
-                c=[colors[i]],
-                label=name,
-                alpha=0.6,
-                s=20,
+                pts[:, 0],
+                pts[:, 1],
+                c=[class_colors[i % len(class_colors)]],
+                label=label_str,
+                alpha=0.55,
+                s=24,
                 edgecolors="none",
+                zorder=2,
             )
 
-        ax.set_title(title)
-        ax.legend(loc="best", title="Class")
-        ax.grid(True, alpha=0.3)
+            # Draw cluster centroid with highlight pill
+            if len(pts) > 0:
+                cx, cy = np.median(pts[:, 0]), np.median(pts[:, 1])
+                ax.scatter(
+                    cx, cy,
+                    c="black",
+                    s=80,
+                    marker="X",
+                    zorder=4,
+                    edgecolors="white",
+                    linewidths=1.5,
+                )
+                ax.annotate(
+                    f"{name}",
+                    (cx, cy),
+                    xytext=(0, 10),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                    fontweight="bold",
+                    color="#111111",
+                    bbox=dict(
+                        boxstyle="round,pad=0.25",
+                        facecolor="white",
+                        edgecolor=class_colors[i % len(class_colors)],
+                        alpha=0.85,
+                        linewidth=1.2,
+                    ),
+                    zorder=5,
+                )
+
+        ax.set_title(f"{title}\n(N={len(labels):,} nodes sampled from {total_nodes:,} total)", fontsize=13, fontweight="bold", pad=12)
+        ax.set_xlabel("t-SNE Dimension 1", fontsize=11)
+        ax.set_ylabel("t-SNE Dimension 2", fontsize=11)
+        ax.legend(loc="upper right", framealpha=0.9, facecolor="#F8F9FA", edgecolor="#CCCCCC", fontsize=9.5, title="Class Distribution")
+        ax.grid(True, linestyle="--", alpha=0.35, zorder=1)
+        ax.set_facecolor("#FAFAFA")
+        for spine in ax.spines.values():
+            spine.set_color("#CCCCCC")
 
         plt.tight_layout()
 

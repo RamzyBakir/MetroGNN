@@ -49,7 +49,7 @@ def train_enhanced_model_gpu(
         use_amp: Use automatic mixed precision (default: True)
 
     Returns:
-        model, train_losses, val_metrics, final_logits
+        model, train_losses, val_metrics, final_imp_logits, final_role_logits, final_inf_scores
     """
 
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -146,7 +146,7 @@ def train_enhanced_model_gpu(
     role_targets = role_targets.to(device)
     influence_targets = influence_targets.to(device)
 
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
 
     model.train()
     for epoch in range(epochs):
@@ -158,7 +158,7 @@ def train_enhanced_model_gpu(
         for batch in train_loader:
             batch = batch.to(device)
 
-            with torch.cuda.amp.autocast(enabled=use_amp and device.type == "cuda"):
+            with torch.amp.autocast("cuda", enabled=use_amp and device.type == "cuda"):
                 try:
                     (
                         updated_embeddings,
@@ -176,18 +176,21 @@ def train_enhanced_model_gpu(
                 and influence_scores is not None
             ):
                 batch_train_idx = batch["author"].batch_size
+                author_storage = batch["author"]
+                author_n_id = getattr(author_storage, "n_id", getattr(author_storage, "input_n_id", None))
+                target_ids = author_n_id[:batch_train_idx] if author_n_id is not None else slice(0, batch_train_idx)
 
                 loss_importance = criterion_class(
                     importance_logits[:batch_train_idx],
-                    importance_targets[batch["author"].input_n_id[:batch_train_idx]],
+                    importance_targets[target_ids],
                 )
                 loss_role = criterion_class(
                     role_logits[:batch_train_idx],
-                    role_targets[batch["author"].input_n_id[:batch_train_idx]],
+                    role_targets[target_ids],
                 )
                 loss_influence = criterion_reg(
                     influence_scores[:batch_train_idx].squeeze(),
-                    influence_targets[batch["author"].input_n_id[:batch_train_idx]],
+                    influence_targets[target_ids],
                 )
 
                 total_loss = (
@@ -230,18 +233,21 @@ def train_enhanced_model_gpu(
                     continue
 
                 batch_val_idx = batch["author"].batch_size
+                author_storage = batch["author"]
+                author_n_id = getattr(author_storage, "n_id", getattr(author_storage, "input_n_id", None))
+                val_target_ids = author_n_id[:batch_val_idx] if author_n_id is not None else slice(0, batch_val_idx)
 
                 val_loss_importance = criterion_class(
                     val_imp_logits[:batch_val_idx],
-                    importance_targets[batch["author"].input_n_id[:batch_val_idx]],
+                    importance_targets[val_target_ids],
                 )
                 val_loss_role = criterion_class(
                     val_role_logits[:batch_val_idx],
-                    role_targets[batch["author"].input_n_id[:batch_val_idx]],
+                    role_targets[val_target_ids],
                 )
                 val_loss_influence = criterion_reg(
                     val_inf_scores[:batch_val_idx].squeeze(),
-                    influence_targets[batch["author"].input_n_id[:batch_val_idx]],
+                    influence_targets[val_target_ids],
                 )
                 val_batch_loss = (
                     val_loss_importance * 0.5
@@ -256,17 +262,17 @@ def train_enhanced_model_gpu(
                     val_imp_logits[:batch_val_idx].argmax(dim=1).cpu()
                 )
                 all_val_imp_targets.append(
-                    importance_targets[batch["author"].input_n_id[:batch_val_idx]].cpu()
+                    importance_targets[val_target_ids].cpu()
                 )
                 all_val_role_preds.append(
                     val_role_logits[:batch_val_idx].argmax(dim=1).cpu()
                 )
                 all_val_role_targets.append(
-                    role_targets[batch["author"].input_n_id[:batch_val_idx]].cpu()
+                    role_targets[val_target_ids].cpu()
                 )
                 all_val_inf_preds.append(val_inf_scores[:batch_val_idx].squeeze().cpu())
                 all_val_inf_targets.append(
-                    influence_targets[batch["author"].input_n_id[:batch_val_idx]].cpu()
+                    influence_targets[val_target_ids].cpu()
                 )
 
         model.train()

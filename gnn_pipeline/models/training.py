@@ -1,18 +1,16 @@
+import os
+import random
 import numpy as np
+import pandas as pd
 import torch
 import torch.optim as optim
 from sklearn.metrics import accuracy_score
-import pandas as pd
-import os
-import random
 
 from gnn_pipeline.models.checkpoint import load_checkpoint_payload, save_model_checkpoint
 from gnn_pipeline.data.time_utils import infer_observation_year
 
-
 try:
     from gnn_pipeline.config import get_path
-
     HAS_CONFIG = True
 except ImportError:
     HAS_CONFIG = False
@@ -20,7 +18,6 @@ except ImportError:
 
 try:
     from gnn_pipeline.utils.visualization import plot_training_history
-
     HAS_VISUALIZATION = True
 except ImportError:
     HAS_VISUALIZATION = False
@@ -111,9 +108,6 @@ def create_enhanced_training_targets(data):
     """
     global _external_df, _external_author_to_idx
 
-    # ================================================================
-    # REQUIRE EXTERNAL DATA - NO FALLBACK TO CIRCULAR DEPENDENCY
-    # ================================================================
     if _external_df is None or _external_author_to_idx is None:
         raise RuntimeError(
             "\n" + "=" * 70 + "\n"
@@ -133,7 +127,6 @@ def create_enhanced_training_targets(data):
 
     df = _external_df
     author_to_idx = _external_author_to_idx
-
     num_authors = len(author_to_idx)
 
     # Get authorship edges from graph
@@ -141,9 +134,7 @@ def create_enhanced_training_targets(data):
     paper_ids = authored_edges[1].cpu().numpy()
     author_ids = authored_edges[0].cpu().numpy()
 
-    # ================================================================
     # IMPORTANCE TARGETS (from paper citations - EXTERNAL)
-    # ================================================================
     paper_citations = pd.to_numeric(df["n_citation"], errors="coerce").fillna(0).values
 
     current_year = infer_observation_year(df)
@@ -155,16 +146,13 @@ def create_enhanced_training_targets(data):
         age = max(1, int(current_year - year))
         citation_velocity[i] = paper_citations[i] / age
 
-    # Paper importance (ONLY from external data - NOT from author features)
     paper_importance = paper_citations * 0.6 + citation_velocity * 0.4
 
-    # Aggregate to authors (sum of paper importance)
     author_importance = np.zeros(num_authors)
     for author_id, paper_id in zip(author_ids, paper_ids):
         if paper_id < len(paper_importance):
             author_importance[author_id] += paper_importance[paper_id]
 
-    # Percentile-based labels (3 classes)
     percentiles = np.argsort(np.argsort(author_importance)) / num_authors
 
     importance_targets = torch.zeros(num_authors, dtype=torch.long)
@@ -172,9 +160,7 @@ def create_enhanced_training_targets(data):
     importance_targets[(percentiles > 0.33) & (percentiles <= 0.66)] = 1  # Medium
     importance_targets[percentiles > 0.66] = 2  # High
 
-    # ================================================================
     # ROLE TARGETS (from graph degree - EXTERNAL metric)
-    # ================================================================
     role_targets = torch.zeros(num_authors, dtype=torch.long)
     collab_edges = data["author", "collaborates_with", "author"].edge_index
 
@@ -195,9 +181,7 @@ def create_enhanced_training_targets(data):
         else:
             role_targets[i] = 2  # Contributor
 
-    # ================================================================
     # INFLUENCE TARGETS (from citation velocity - EXTERNAL)
-    # ================================================================
     author_velocity = np.zeros(num_authors)
     for author_id, paper_id in zip(author_ids, paper_ids):
         if paper_id < len(citation_velocity):
@@ -211,7 +195,6 @@ def create_enhanced_training_targets(data):
         influence_targets = np.zeros(num_authors)
     influence_targets = torch.tensor(influence_targets, dtype=torch.float32)
 
-    # Print summary
     print(
         f"\n  Importance: Low={sum(importance_targets == 0)}, Medium={sum(importance_targets == 1)}, High={sum(importance_targets == 2)}"
     )
@@ -226,16 +209,25 @@ def create_enhanced_training_targets(data):
 
 
 def train_enhanced_model(
-    model, data, epochs=200, checkpoint_path=None, pipeline_id=None, seed: int = 42
+    model,
+    data,
+    epochs=200,
+    checkpoint_path=None,
+    pipeline_id=None,
+    seed: int = 42,
+    device=None,
 ):
     """
     Train MetroGNN model with multi-task learning using EXTERNAL ground truth.
-
-    IMPORTANT: Call set_external_data(df, author_to_idx) BEFORE this function.
+    Supports automatic GPU acceleration when device is cuda.
     """
     if not pipeline_id:
         raise ValueError("A v2 pipeline_id is required for versioned model checkpoints")
     set_training_seed(seed)
+
+    dev = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if isinstance(dev, str):
+        dev = torch.device(dev)
 
     if checkpoint_path is None and HAS_CONFIG:
         checkpoint_path = get_path("models", "best_model")
@@ -244,14 +236,20 @@ def train_enhanced_model(
         checkpoint_path = "models/best_model.pth"
 
     print("=" * 60)
-    print("Starting enhanced training with multi-task learning")
+    print(f"Starting enhanced training on {dev} with multi-task learning")
     print("Using EXTERNAL ground truth (no circular dependency)")
     print("=" * 60)
 
-    # Create targets from EXTERNAL data only
+    model = model.to(dev)
+    data = data.to(dev)
+
     importance_targets, role_targets, influence_targets = (
         create_enhanced_training_targets(data)
     )
+
+    importance_targets = importance_targets.to(dev)
+    role_targets = role_targets.to(dev)
+    influence_targets = influence_targets.to(dev)
 
     num_researchers = len(importance_targets)
     train_idx, val_idx, test_idx = create_author_split_indices(
@@ -279,6 +277,9 @@ def train_enhanced_model(
         except Exception as e:
             print(f"Warning: Could not save split indices: {e}")
 
+    train_idx_dev = torch.as_tensor(train_idx, dtype=torch.long, device=dev)
+    val_idx_dev = torch.as_tensor(val_idx, dtype=torch.long, device=dev)
+
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=15, min_lr=1e-6
@@ -299,9 +300,9 @@ def train_enhanced_model(
         f"researchers, holding out {len(test_idx)} diagnostic test researchers"
     )
     print(
-        f"Class distribution - Importance: {torch.bincount(importance_targets).tolist()}"
+        f"Class distribution - Importance: {torch.bincount(importance_targets.cpu()).tolist()}"
     )
-    print(f"Class distribution - Roles: {torch.bincount(role_targets).tolist()}")
+    print(f"Class distribution - Roles: {torch.bincount(role_targets.cpu()).tolist()}")
 
     model.train()
     for epoch in range(epochs):
@@ -321,11 +322,11 @@ def train_enhanced_model(
             and influence_scores is not None
         ):
             loss_importance = criterion_class(
-                importance_logits[train_idx], importance_targets[train_idx]
+                importance_logits[train_idx_dev], importance_targets[train_idx_dev]
             )
-            loss_role = criterion_class(role_logits[train_idx], role_targets[train_idx])
+            loss_role = criterion_class(role_logits[train_idx_dev], role_targets[train_idx_dev])
             loss_influence = criterion_reg(
-                influence_scores[train_idx].squeeze(), influence_targets[train_idx]
+                influence_scores[train_idx_dev].squeeze(), influence_targets[train_idx_dev]
             )
 
             total_loss = loss_importance * 0.5 + loss_role * 0.3 + loss_influence * 0.2
@@ -343,31 +344,31 @@ def train_enhanced_model(
                     )
 
                     val_imp_acc = accuracy_score(
-                        importance_targets[val_idx].numpy(),
-                        val_imp_logits[val_idx].argmax(dim=1).numpy(),
+                        importance_targets[val_idx_dev].cpu().numpy(),
+                        val_imp_logits[val_idx_dev].argmax(dim=1).cpu().numpy(),
                     )
                     val_role_acc = accuracy_score(
-                        role_targets[val_idx].numpy(),
-                        val_role_logits[val_idx].argmax(dim=1).numpy(),
+                        role_targets[val_idx_dev].cpu().numpy(),
+                        val_role_logits[val_idx_dev].argmax(dim=1).cpu().numpy(),
                     )
                     val_inf_mae = torch.abs(
-                        val_inf_scores[val_idx].squeeze() - influence_targets[val_idx]
-                    ).mean()
+                        val_inf_scores[val_idx_dev].squeeze() - influence_targets[val_idx_dev]
+                    ).mean().item()
 
                     val_loss_importance = criterion_class(
-                        val_imp_logits[val_idx], importance_targets[val_idx]
+                        val_imp_logits[val_idx_dev], importance_targets[val_idx_dev]
                     )
                     val_loss_role = criterion_class(
-                        val_role_logits[val_idx], role_targets[val_idx]
+                        val_role_logits[val_idx_dev], role_targets[val_idx_dev]
                     )
                     val_loss_influence = criterion_reg(
-                        val_inf_scores[val_idx].squeeze(), influence_targets[val_idx]
+                        val_inf_scores[val_idx_dev].squeeze(), influence_targets[val_idx_dev]
                     )
                     val_total_loss = (
                         val_loss_importance * 0.5
                         + val_loss_role * 0.3
                         + val_loss_influence * 0.2
-                    )
+                    ).item()
 
                 except Exception as e:
                     print(f"Error in validation at epoch {epoch}: {e}")
@@ -382,7 +383,7 @@ def train_enhanced_model(
 
             train_losses.append(total_loss.item())
             val_metrics.append(
-                (val_imp_acc, val_role_acc, val_inf_mae.item(), val_total_loss.item())
+                (val_imp_acc, val_role_acc, val_inf_mae, val_total_loss)
             )
 
             scheduler.step(val_total_loss)
@@ -403,7 +404,7 @@ def train_enhanced_model(
                 current_lr = optimizer.param_groups[0]["lr"]
                 print(f"Epoch {epoch:03d}/{epochs}:")
                 print(
-                    f"  Loss: {total_loss:.4f} (Imp: {loss_importance:.4f}, Role: {loss_role:.4f}, Inf: {loss_influence:.4f})"
+                    f"  Loss: {total_loss.item():.4f} (Imp: {loss_importance.item():.4f}, Role: {loss_role.item():.4f}, Inf: {loss_influence.item():.4f})"
                 )
                 print(f"  Val Loss: {val_total_loss:.4f}, LR: {current_lr:.6f}")
                 print(
@@ -422,7 +423,7 @@ def train_enhanced_model(
 
     # Load best model
     try:
-        payload = load_checkpoint_payload(checkpoint_path)
+        payload = load_checkpoint_payload(checkpoint_path, map_location=dev)
         if payload.get("pipeline_id") != pipeline_id:
             raise RuntimeError("Checkpoint pipeline ID mismatch")
         model.load_state_dict(payload["state_dict"])
@@ -439,14 +440,18 @@ def train_enhanced_model(
             )
 
             final_imp_acc = accuracy_score(
-                importance_targets.numpy(), final_imp_logits.argmax(dim=1).numpy()
+                importance_targets.cpu().numpy(),
+                final_imp_logits.cpu().argmax(dim=1).numpy(),
             )
             final_role_acc = accuracy_score(
-                role_targets.numpy(), final_role_logits.argmax(dim=1).numpy()
+                role_targets.cpu().numpy(),
+                final_role_logits.cpu().argmax(dim=1).numpy(),
             )
-            final_inf_mae = torch.abs(
-                final_inf_scores.squeeze() - influence_targets
-            ).mean()
+            final_inf_mae = (
+                torch.abs(final_inf_scores.cpu().squeeze() - influence_targets.cpu())
+                .mean()
+                .item()
+            )
 
             print(f"\n=== FINAL PERFORMANCE (External Ground Truth) ===")
             print(f"Importance Accuracy: {final_imp_acc:.4f} ({final_imp_acc:.1%})")

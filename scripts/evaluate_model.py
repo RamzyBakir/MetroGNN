@@ -148,13 +148,13 @@ def run_evaluation(model, graph, device, save_dir):
     )
     plt.close("all")
 
-    print("Generating regression analysis ...")
+    print(f"Generating regression analysis on {device} ...")
     model.eval()
-    model_cpu = model.to("cpu")
-    graph_cpu = graph.to("cpu")
+    model_dev = model.to(device)
+    graph_dev = graph.to(device)
     with torch.no_grad():
-        x_dict, imp_logits, role_logits, inf_scores = model_cpu(
-            graph_cpu.x_dict, graph_cpu.edge_index_dict
+        x_dict, imp_logits, role_logits, inf_scores = model_dev(
+            graph_dev.x_dict, graph_dev.edge_index_dict
         )
     inf_true_all = targets["influence"][test_idx].cpu().numpy()
     inf_pred_all = inf_scores[test_idx].squeeze().cpu().numpy()
@@ -169,21 +169,18 @@ def run_evaluation(model, graph, device, save_dir):
     print("Generating t-SNE visualizations ...")
     author_emb = x_dict.get("author", x_dict.get("author_enhanced"))
     if author_emb is not None:
-        emb_np = author_emb.cpu().numpy()
-        imp_labels = targets["importance"].numpy()
         evaluator.plot_tsne_embeddings(
-            emb_np,
-            imp_labels,
+            author_emb,
+            targets["importance"],
             label_names=evaluator.IMPORTANCE_NAMES,
             title="t-SNE (colored by Importance)",
             save_path=os.path.join(results_dir, "tsne_importance.png"),
         )
         plt.close("all")
 
-        role_labels = targets["role"].numpy()
         evaluator.plot_tsne_embeddings(
-            emb_np,
-            role_labels,
+            author_emb,
+            targets["role"],
             label_names=evaluator.ROLE_NAMES,
             title="t-SNE (colored by Role)",
             save_path=os.path.join(results_dir, "tsne_role.png"),
@@ -202,10 +199,10 @@ def run_evaluation(model, graph, device, save_dir):
     print("Evaluating embedding quality ...")
     if author_emb is not None:
         emb_quality_imp = evaluator.evaluate_embedding_quality(
-            emb_np, targets["importance"].numpy()
+            author_emb, targets["importance"], device=device
         )
         emb_quality_role = evaluator.evaluate_embedding_quality(
-            emb_np, targets["role"].numpy()
+            author_emb, targets["role"], device=device
         )
         print(f"\n  Embedding quality (importance labels):")
         for k, v in emb_quality_imp.items():
