@@ -9,6 +9,7 @@ services:
     working_dir: /app
     gpus: all
     environment:
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       PYTHONPYCACHEPREFIX: /tmp/pycache
       PYTHONUNBUFFERED: "1"
       MPLBACKEND: Agg

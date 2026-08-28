@@ -26,7 +26,7 @@ RUN sed -n '/^pandas/Ip;/^numpy/Ip;/^scikit-learn/Ip;/^networkx/Ip;/^pyyaml/Ip;/
     && pip install --no-compile -r /tmp/requirements-core.txt
 RUN sed -n '/^torch-geometric/Ip' requirements.txt > /tmp/requirements-pyg.txt \
     && pip install --no-compile -r /tmp/requirements-pyg.txt
-RUN sed -n '/^chromadb/Ip;/^sentence-transformers/Ip;/^mcp/Ip;/^pydantic/Ip' requirements.txt > /tmp/requirements-services.txt \
+RUN sed -n '/^chromadb/Ip;/^sentence-transformers/Ip;/^mcp/Ip;/^pydantic/Ip;/^openai/Ip' requirements.txt > /tmp/requirements-services.txt \
     && pip install --no-compile -r /tmp/requirements-services.txt
 
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"

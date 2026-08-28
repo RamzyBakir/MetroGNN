@@ -157,13 +157,25 @@ intervals, and emits paper-ready report/table files under `saved_results`.
 
 ## Evaluate MCP Agent Traces
 
+To generate execution traces by running the agent benchmark tasks:
+
+```powershell
+docker compose run --rm metrognn python scripts/run_agent_benchmark.py --tasks agents/benchmarks/mcp_agent_tasks.jsonl --output /app/saved_results/agent_traces.jsonl
+```
+
+Then, score the saved trace file against `agents/benchmarks/mcp_agent_tasks.jsonl`. Use `--allow-partial` only for debugging incomplete trace captures:
+
 ```powershell
 docker compose run --rm metrognn python scripts/evaluate_mcp_agent_traces.py --traces /app/saved_results/agent_traces.jsonl
 ```
 
-Scores a complete saved trace file against
-`agents/benchmarks/mcp_agent_tasks.jsonl`. Use `--allow-partial` only for
-debugging incomplete trace captures.
+## Run The Agent Client
+
+To interact with the agent interactively over the terminal using OpenRouter (Gemini / Llama) free model:
+
+```powershell
+docker compose run --rm -e OPENROUTER_API_KEY="your_api_key_here" -it metrognn python scripts/mcp_agent_client.py
+```
 
 ## Profile Training And Serving
 

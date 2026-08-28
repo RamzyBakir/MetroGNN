@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from gnn_pipeline.data.parsing import parse_authors
+from gnn_pipeline.data.validation import ensure_paper_identity_columns
 
 from .baselines import BM25Recommender, TfidfRecommender
 from .embeddings import EmbeddingTable
@@ -44,7 +45,7 @@ class TemporalFeatureStore:
         unknown = self.enabled_features - set(FEATURE_NAMES)
         if unknown:
             raise ValueError(f"Unknown recommendation features: {sorted(unknown)}")
-        raw = pd.read_csv(raw_csv_path, usecols=["id", "year", "authors"])
+        raw = ensure_paper_identity_columns(pd.read_csv(raw_csv_path))
         raw["paper_id"] = raw["id"].astype(str)
         raw["year_numeric"] = pd.to_numeric(raw["year"], errors="coerce")
         self.paper_authors: Dict[str, List[str]] = {}

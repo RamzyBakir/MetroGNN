@@ -7,6 +7,7 @@ services:
     init: true
     working_dir: /app
     environment:
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       PYTHONPYCACHEPREFIX: /tmp/pycache
       PYTHONUNBUFFERED: "1"
       MPLBACKEND: Agg

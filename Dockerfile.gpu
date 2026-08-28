@@ -34,7 +34,7 @@ RUN pip install --no-compile pyg_lib torch_scatter torch_sparse torch_cluster to
     -f https://data.pyg.org/whl/torch-2.8.0+cu128.html
 RUN sed -n '/^torch-geometric/Ip' requirements.txt > /tmp/requirements-pyg.txt \
     && pip install --no-compile -r /tmp/requirements-pyg.txt
-RUN sed -n '/^chromadb/Ip;/^sentence-transformers/Ip;/^mcp/Ip;/^pydantic/Ip' requirements.txt > /tmp/requirements-services.txt \
+RUN sed -n '/^chromadb/Ip;/^sentence-transformers/Ip;/^mcp/Ip;/^pydantic/Ip;/^openai/Ip' requirements.txt > /tmp/requirements-services.txt \
     && pip install --no-compile -r /tmp/requirements-services.txt
 
 RUN python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)" \

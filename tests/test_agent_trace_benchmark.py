@@ -103,6 +103,22 @@ class AgentTraceBenchmarkTests(unittest.TestCase):
             ],
         )
 
+    def test_saved_benchmark_traces_achieve_perfect_score_if_present(self):
+        from pathlib import Path
+        from gnn_pipeline.evaluation.agent import evaluate_traces, load_task_specs, load_traces
+
+        tasks_file = Path("agents/benchmarks/mcp_agent_tasks.jsonl")
+        traces_file = Path("saved_results/agent_traces.jsonl")
+        if tasks_file.exists() and traces_file.exists():
+            tasks = load_task_specs(str(tasks_file))
+            traces = load_traces(str(traces_file))
+            validate_trace_coverage(tasks, traces)
+            evaluations = evaluate_traces(tasks, traces)
+            summary = summarize_evaluations(evaluations)
+            self.assertEqual(summary["tasks_evaluated"], len(tasks))
+            self.assertEqual(summary["overall_score"], 1.0)
+            self.assertEqual(summary["valid_tool_sequence_rate"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

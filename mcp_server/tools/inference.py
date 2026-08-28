@@ -1,11 +1,22 @@
 import json
 import logging
 from pathlib import Path
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
+import pandas as pd
 import torch
 from mcp.server.mcpserver import Context
 from pydantic import Field
+
+def _safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return default
+    try:
+        if isinstance(value, str):
+            value = value.strip().strip('"').strip("'")
+        return int(float(value))
+    except (ValueError, TypeError):
+        return default
 
 from gnn_pipeline.artifacts import validate_pipeline_manifest
 from gnn_pipeline.config import get_path
@@ -336,25 +347,29 @@ async def run_inference(
             else 0.0
         )
 
-        topic_id = paper_topic_edges.get(
-            pid, int(row.get("topic_id", -1)) if pd.notna(row.get("topic_id")) else -1
-        )
+        raw_topic = paper_topic_edges.get(pid)
+        if raw_topic is None:
+            raw_topic = _safe_int(row.get("topic_id"), -1)
+        else:
+            raw_topic = _safe_int(raw_topic, -1)
+        topic_id = raw_topic if raw_topic is not None and raw_topic >= 0 else None
 
         semantic_sim = similarity_map.get(pid, 0.0)
         combined_score = 0.6 * semantic_sim + 0.4 * agg_influence
+
+        year_val = _safe_int(row.get("year"), None)
+        citations_val = _safe_int(row.get("n_citation"), 0) or 0
 
         papers.append(
             PaperResult(
                 paper_id=pid,
                 title=str(row.get("title", f"Paper {pid}")),
-                year=int(row["year"]) if pd.notna(row.get("year")) else None,
-                citations=int(row["n_citation"])
-                if pd.notna(row.get("n_citation"))
-                else 0,
+                year=year_val,
+                citations=citations_val,
                 venue=str(row.get("venue", "")),
-                topic_id=int(topic_id) if topic_id >= 0 else None,
-                topic_name=(app.topic_names or {}).get(int(topic_id), f"Topic {int(topic_id)}")
-                if topic_id >= 0
+                topic_id=topic_id,
+                topic_name=(app.topic_names or {}).get(topic_id, f"Topic {topic_id}")
+                if topic_id is not None
                 else "",
                 authors=[_make_author_profile(a) for a in authors_data],
                 aggregated_influence=agg_influence,

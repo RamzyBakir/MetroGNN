@@ -1,0 +1,91 @@
+experiment:
+  name: citation_temporal_v2
+  validation_split: validation
+  forbidden_during_tuning: test
+  model_version: 2
+  benchmark_dir: saved_results/benchmarks/citation_temporal_v1
+  raw_csv_path: train/DBLP-Citation-network-V18-1-20-25_clean.csv
+  seeds: [13, 42, 77, 101, 202]
+  output_root: saved_results/phase3_validation_v2
+
+embeddings:
+  cache_root: saved_results/embeddings
+  candidates:
+    minilm:
+      model_name: sentence-transformers/all-MiniLM-L6-v2
+      text_mode: document
+      batch_size: 256
+      normalize: true
+    scholarly:
+      model_name: allenai/specter2_base
+      text_mode: document
+      batch_size: 256
+      normalize: true
+
+temporal_graph:
+  cache_root: saved_results/temporal_graphs
+  topic_training_cutoff: 2022
+  n_topics: 8
+  training_cutoffs: [2020, 2021]
+  validation_cutoff: 2022
+  final_test_cutoff: 2023
+
+sampling:
+  output_dir: saved_results/phase3_samples
+  random_negatives: 20
+  hard_negatives: 20
+  seed: 42
+
+model_search:
+  fusion_weights: [0.0, 0.25, 0.5, 0.75, 1.0]
+  primary_metric: ndcg@10
+  tie_breaker: recall@20
+  maximum_coarse_trials: 12
+  top_configurations: 2
+  max_epochs: 20
+  early_stopping_patience: 5
+  search_space:
+    hidden_dim: [32, 64]
+    num_layers: [1, 2]
+    dropout: [0.0, 0.1, 0.2]
+    learning_rate: [0.001, 0.005]
+
+architectures:
+  - text_dual_encoder
+  - feature_linear
+  - feature_mlp
+  - citation_sage
+  - hetero_sage
+  - hgt
+
+relation_ablations:
+  full:
+    authorship: true
+    collaboration: true
+    citation: true
+    topic: true
+  full_without_topics:
+    authorship: true
+    collaboration: true
+    citation: true
+    topic: false
+  authorship_citation:
+    authorship: true
+    collaboration: false
+    citation: true
+    topic: false
+  authorship_collaboration:
+    authorship: true
+    collaboration: true
+    citation: false
+    topic: false
+  authorship_only:
+    authorship: true
+    collaboration: false
+    citation: false
+    topic: false
+
+final_test:
+  registry_root: saved_results/phase3_final_registry
+  frozen_baseline_manifest: saved_results/evaluations/citation_temporal_v1/f7bfa451c5b6/run_manifest.json
+  required_seed_count: 5

@@ -32,11 +32,14 @@ def ensure_paper_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     result = df.copy()
     if "id" not in result.columns:
-        result.insert(
-            0,
-            "id",
-            [f"{LEGACY_SYNTHETIC_ID_PREFIX}{idx}" for idx in range(len(result))],
-        )
+        if "paper_id" in result.columns:
+            result.insert(0, "id", result["paper_id"].astype(str))
+        else:
+            result.insert(
+                0,
+                "id",
+                [f"{LEGACY_SYNTHETIC_ID_PREFIX}{idx}" for idx in range(len(result))],
+            )
     if "references" not in result.columns:
         result["references"] = "[]"
     return result

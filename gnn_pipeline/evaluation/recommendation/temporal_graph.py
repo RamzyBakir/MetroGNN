@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List
@@ -16,7 +17,8 @@ from sklearn.cluster import KMeans
 from gnn_pipeline.artifacts import sha256_file, write_json_atomic
 from gnn_pipeline.data.feature_engineering import create_author_features
 from gnn_pipeline.data.graph_builder import build_knowledge_graph_from_dblp
-from gnn_pipeline.data.parsing import build_author_index
+from gnn_pipeline.data.parsing import build_author_index, parse_list_field
+from gnn_pipeline.data.validation import ensure_paper_identity_columns
 
 from .embeddings import EmbeddingTable
 
@@ -135,7 +137,16 @@ def build_temporal_graph_snapshot(
     relation_config: RelationConfig,
 ) -> TemporalGraphSnapshot:
     """Build a graph containing no paper or relation after cutoff_year."""
-    raw = pd.read_csv(raw_csv_path)
+    raw = ensure_paper_identity_columns(benchmark.papers.copy())
+    if "authors" not in raw.columns:
+        try:
+            raw_source = ensure_paper_identity_columns(pd.read_csv(raw_csv_path))
+            if "authors" in raw_source.columns and len(raw_source) >= len(raw):
+                raw["authors"] = raw_source["authors"].iloc[: len(raw)].values
+            else:
+                raw["authors"] = "[]"
+        except Exception:
+            raw["authors"] = "[]"
     raw["paper_id"] = raw["id"].astype(str)
     raw["year_numeric"] = pd.to_numeric(raw["year"], errors="coerce")
     frame = raw[raw["year_numeric"].notna() & (raw["year_numeric"] <= cutoff_year)].copy()
@@ -146,6 +157,19 @@ def build_temporal_graph_snapshot(
     ].astype(str).tolist()
     if paper_ids != expected_ids:
         raise ValueError("Temporal graph paper order differs from benchmark candidate order")
+
+    if "references" not in frame.columns or frame["references"].apply(lambda x: len(parse_list_field(x))).sum() == 0:
+        if hasattr(benchmark, "citation_edges") and not benchmark.citation_edges.empty:
+            edges = benchmark.citation_edges[
+                (benchmark.citation_edges["source_year"] <= cutoff_year)
+                & (benchmark.citation_edges["target_year"] <= cutoff_year)
+            ]
+            refs_by_source = defaultdict(list)
+            for _, edge in edges.iterrows():
+                refs_by_source[str(edge["source_id"])].append(str(edge["target_id"]))
+            frame["references"] = frame["paper_id"].apply(
+                lambda pid: str(refs_by_source.get(str(pid), []))
+            )
 
     paper_embeddings = embedding_table.lookup(paper_ids).astype(np.float32)
     paper_embeddings = _normalize_rows(paper_embeddings)

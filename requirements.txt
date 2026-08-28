@@ -31,3 +31,6 @@ scipy>=1.7.0
 # Test runner
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
+
+# Agent Client
+openai>=1.0.0
