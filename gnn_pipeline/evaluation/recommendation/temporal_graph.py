@@ -341,6 +341,9 @@ def find_temporal_snapshot(root: str, cutoff_year: int) -> TemporalGraphSnapshot
     return load_temporal_snapshot(str(manifests[0].parent))
 
 
+load_temporal_graph_snapshot = find_temporal_snapshot
+
+
 def load_temporal_snapshot(snapshot_dir: str) -> TemporalGraphSnapshot:
     root = Path(snapshot_dir)
     manifest = json.loads((root / "manifest.json").read_text())

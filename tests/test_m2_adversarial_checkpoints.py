@@ -8,8 +8,8 @@ import torch
 from gnn_pipeline.evaluation.recommendation.graph_models import TemporalGraphRanker
 from gnn_pipeline.evaluation.recommendation.graph_training import load_temporal_graph_ranker
 from gnn_pipeline.evaluation.recommendation.temporal_graph import (
+    find_temporal_snapshot,
     load_temporal_snapshot,
-    load_temporal_graph_snapshot,
 )
 
 
@@ -36,7 +36,7 @@ class Phase3AdversarialCheckpointVerificationTests(unittest.TestCase):
             / "checkpoints"
         )
         cls.temporal_graphs_dir = (
-            cls.project_root / "saved_results" / "temporal_graphs" / "minilm"
+            cls.project_root / "saved_results" / "temporal_graphs" / "minilm" / "full"
         )
         cls.validation_summary_path = (
             cls.project_root
@@ -96,7 +96,7 @@ class Phase3AdversarialCheckpointVerificationTests(unittest.TestCase):
             data = json.load(f)
 
         # Load the 2022 validation snapshot
-        snapshot = load_temporal_graph_snapshot(
+        snapshot = find_temporal_snapshot(
             str(self.temporal_graphs_dir), 2022
         )
         self.assertEqual(snapshot.cutoff_year, 2022)
@@ -216,19 +216,25 @@ class Phase3AdversarialCheckpointVerificationTests(unittest.TestCase):
         summary_df = pd.read_csv(self.validation_summary_path)
         trials_df = pd.read_csv(self.validation_trials_path)
 
-        self.assertEqual(len(summary_df), 4)  # 4 configs
-        self.assertEqual(len(trials_df), 20)  # 20 trials
+        self.assertEqual(len(summary_df), 2)  # Top-2 configs evaluated
+        self.assertEqual(len(trials_df), 22)  # 12 coarse + 10 repeated trials
 
         with open(self.frozen_path, "r", encoding="utf-8") as f:
             frozen = json.load(f)
         winner_cfg = frozen["winner_config"]
+        winner_cfg_id = frozen["winner_config_id"]
 
-        # Check winner config matches highest ranked row in summary_df
+        # Check winner config ID matches highest ranked row in summary_df
         top_row = summary_df.iloc[0]
-        self.assertEqual(int(top_row["hidden_dim"]), winner_cfg["hidden_dim"])
-        self.assertEqual(int(top_row["num_layers"]), winner_cfg["num_layers"])
-        self.assertEqual(float(top_row["dropout"]), winner_cfg["dropout"])
-        self.assertAlmostEqual(float(top_row["learning_rate"]), winner_cfg["learning_rate"])
+        self.assertEqual(top_row["config_id"], winner_cfg_id)
+
+        # Check config hyperparameters from matching trials
+        matching_trial = trials_df[trials_df["config_id"] == winner_cfg_id].iloc[0]
+        trial_cfg = json.loads(matching_trial["config"])
+        self.assertEqual(trial_cfg["hidden_dim"], winner_cfg["hidden_dim"])
+        self.assertEqual(trial_cfg["num_layers"], winner_cfg["num_layers"])
+        self.assertEqual(trial_cfg["dropout"], winner_cfg["dropout"])
+        self.assertAlmostEqual(trial_cfg["learning_rate"], winner_cfg["learning_rate"])
 
 
 if __name__ == "__main__":
