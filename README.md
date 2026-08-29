@@ -12,8 +12,9 @@ citation relations, artifact compatibility, and MCP contracts. The current
 heuristic training targets and historical statistical reports have **not** yet
 been replaced; they must not be treated as final paper evidence.
 
-The files under `agents/prompts/` are design material. The current runtime is an
-MCP tool server and deterministic strategy pipeline, not an evaluated LLM agent.
+The interactive agent system is powered by `scripts/mcp_agent_client.py`
+and the unified system prompt in `prompts/agent_prompt.md`, connecting
+an LLM directly to the MetroGNN Model Context Protocol (MCP) server tools.
 
 ## Environment
 
