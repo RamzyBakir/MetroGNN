@@ -1,0 +1,36 @@
+# MetroGNN Configuration
+# All paths are relative to the project root (where this file lives).
+
+data:
+  csv_path: "train/DBLP-ML-NLP-2018-2025_clean.csv"
+  # Versioned topic artifacts are generated together and validated against the CSV.
+  topic_json_path: "models/topic_info_v2.json"
+  topic_assignments_path: "models/paper_topic_assignments_ml_nlp.csv"
+  topic_centroids_path: "models/topic_centroids_v2.npz"
+
+models:
+  dir: "models"
+  best_model: "models/best_model_v2.pth"
+  best_model_gpu: "models/best_model_gpu_v2.pth"
+  best_model_new: "models/best_model_v2.pth"
+  knowledge_graph: "models/knowledge_graph_v2.pt"
+  knowledge_graph_data: "models/knowledge_graph_data.pkl"
+  networkx_graph: "models/knowledge_graph_networkx.pkl"
+  vector_store: "models/vector_store_semantic_v2"
+  vector_store_manifest: "models/vector_store_manifest_v2.json"
+  author_mapping: "models/author_mapping_v2.json"
+  pipeline_manifest: "models/pipeline_manifest_v2.json"
+  splits_path: "models/split_indices_v2.pt"
+
+output:
+  results_dir: "saved_results"
+  graph_summary: "saved_results/graph_summary.txt"
+  data_dictionary: "saved_results/data_dictionary.txt"
+
+training:
+  epochs: 300
+  hidden_channels: 64
+  out_channels: 32
+  num_layers: 4
+  num_classes: 3
+  n_clusters: 8
